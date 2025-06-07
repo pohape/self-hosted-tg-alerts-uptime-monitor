@@ -298,6 +298,13 @@ If both **search_string** and **absent_string** are specified, both conditions m
   - Number of failed checks
 - 📆 After recovery, monitoring returns to your custom schedule — fully automated.
 
+### 📊 Automated Summary Reports
+
+- 📅 **Scheduled Summaries**: Configure periodic summary reports using cron syntax
+- 🎯 **Smart Filtering**: Summaries are only sent when there are actually failing services
+- 📋 **Comprehensive Overview**: Shows all services currently down with error details and duration
+- 📢 **Broadcast Delivery**: Sent to all unique chat IDs from your monitored sites
+
 ### 💬 Contributing
 
 Found a bug? Want a new feature? [Open an issue](https://github.com/pohape/self-hosted-tg-alerts-uptime-monitor/issues) or submit a PR!
