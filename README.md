@@ -275,6 +275,7 @@ sites:
 ```
 
 - **telegram_bot_token**: Your Telegram bot token obtained from @BotFather.
+- **summary_schedule** (optional): Cron expression that defines when a consolidated downtime summary should be sent. A message is generated only if at least one monitored service is still failing at that moment.
 - **sites**: A list of sites to monitor.
 - **url**: The URL of the site to monitor.
 - **follow_redirects**: (optional, default is False): Whether to follow HTTP redirects during the request.
