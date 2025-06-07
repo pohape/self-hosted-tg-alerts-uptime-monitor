@@ -345,7 +345,7 @@ def process_cache(cache, config, messages):
         notified_down = cache_info.get('notified_down', None)
         notified_restore = cache_info.get('notified_restore', None)
 
-        if failed_attempts >= notify_after_attempt and not notified_down:
+        if failed_attempts >= notify_after_attempt and not notified_down and cache_info['last_error'] is not None:
             tg_error_msg = generate_tg_error_msg(messages,
                                                  cache_info['last_error']['msg'],
                                                  site_name=cache_info['last_error']['site_name'],
