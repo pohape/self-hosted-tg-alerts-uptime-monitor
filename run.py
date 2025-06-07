@@ -272,10 +272,35 @@ def check_config(config):
             else:
                 report[site_name][Color.WARNING][field_name] = f"not found, default value is '{DEFAULT[field_name]}'"
 
-    print_check_config_report(report)
+    # Check global summary_schedule parameter
+    global_report = {
+        Color.ERROR: {},
+        Color.WARNING: {},
+        Color.SUCCESS: {},
+    }
+
+    if 'summary_schedule' not in config:
+        global_report[Color.WARNING]['summary_schedule'] = 'not found, summary reports will not be sent'
+    else:
+        summary_schedule = config['summary_schedule']
+        if not is_valid_cron(summary_schedule):
+            global_report[Color.ERROR]['summary_schedule'] = f"invalid cron syntax: '{summary_schedule}'"
+        else:
+            global_report[Color.SUCCESS]['summary_schedule'] = summary_schedule
+
+    print_check_config_report(report, global_report)
 
 
-def print_check_config_report(report):
+def print_check_config_report(report, global_report=None):
+    # Print global configuration first
+    if global_report:
+        color_text("\n=== GLOBAL CONFIGURATION ===", Color.TITLE)
+
+        for color, field_info in global_report.items():
+            for field_name, message in field_info.items():
+                color_text(f"  {field_name}: {message}", color)
+
+    # Print site-specific configuration
     for site_name, fields in report.items():
         color_text(f"\n=== {site_name} ===", Color.TITLE)
         for color, field_info in fields.items():
@@ -488,29 +513,20 @@ def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) ->
     ).strip()
 
 
-def generate_summary_msg1(down_sites: list[tuple[str, str]], messages: dict[str, str]) -> str:
-    if 'summary' in messages:
-        services_block = '\n'.join(
-            f"- {telegram_helper.escape_special_chars(name)} — {telegram_helper.escape_special_chars(err)}"
-            for name, err in down_sites
-        )
-
-        return messages['summary'].format(services=services_block, server_info=get_server_info()).strip()
-
-    header = telegram_helper.escape_special_chars('DAILY DOWNTIME SUMMARY')
-    services_block = '\n'.join(
-        f"- {telegram_helper.escape_special_chars(name)} — {telegram_helper.escape_special_chars(err)}"
-        for name, err in down_sites
-    )
-    return f"*{header}*\n\n{services_block}\n\n{get_server_info()}"
-
-
 def should_send_summary(config: dict) -> bool:
     """Check if it's time to send summary based on summary_schedule"""
     if 'summary_schedule' not in config:
         return False
 
-    schedule = config['summary_schedule']
+    schedule = config.get('summary_schedule', '')
+
+    if schedule == '':
+        return False
+    elif not is_valid_cron(schedule):
+        color_text(f"Invalid summary_schedule: '{schedule}'", Color.ERROR)
+
+        return False
+
     base_time = datetime.now().replace(second=0, microsecond=0)
 
     try:
