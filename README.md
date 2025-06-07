@@ -32,7 +32,7 @@ Get instant **Telegram alerts** after N failures and a recovery notification whe
 - 🛠️ **Custom Headers** & POST data
 - 🕒 **Flexible Cron Scheduling** per site
 - 💬 **Telegram Alerts** on errors & recovery
-- 📊 **Scheduled Summary Reports**: one consolidated scheduled Telegram report of all services that are still down
+- 📊 **Summary Reports**: one consolidated scheduled Telegram report of all services that are still down
 - ⚙️ **YAML-Based Config** — easy to read, edit, and version
 - 🧪 **Debug/Test Modes** to simplify setup
 
