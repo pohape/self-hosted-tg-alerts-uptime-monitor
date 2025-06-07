@@ -185,6 +185,7 @@ The configuration is done through the **config.yaml** file. Below is an example 
 ```yaml
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
++summary_schedule: '0 17 * * *'  # (optional) daily summary at 17:00 if at least one site is down
 
 sites:
   # 1. GET request to the main page where we look for "<body>"
