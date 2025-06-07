@@ -326,12 +326,13 @@ def main():
         process_each_site(config, cache, force=args.force)
         save_cache(cache)
         process_cache(cache, config, messages)
+        send_summary_if_due(config, cache, messages)
         save_cache(cache)
 
 
 def process_cache(cache, config, messages):
     for site_name, cache_info in cache.items():
-        failed_attempts = cache_info['failed_attempts']
+        failed_attempts = cache_info.get('failed_attempts', 0)
 
         if site_name not in config['sites']:
             continue
@@ -445,6 +446,114 @@ def process_each_site(config, cache: dict, force=False):
     for site_name, site in config['sites'].items():
         if force or should_run(site.get('schedule', DEFAULT['schedule'])):
             process_site(site, site_name, cache)
+
+
+def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) -> str:
+    """Generate summary message with current services status"""
+    services_down = []
+
+    for site_name, cache_info in cache.items():
+        if site_name not in config['sites']:
+            continue
+
+        site = config['sites'][site_name]
+        notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
+        failed_attempts = cache_info.get('failed_attempts', 0)
+
+        # Only include services that are actually down (failed attempts >= notify threshold)
+        if failed_attempts >= notify_after_attempt and cache_info.get('last_error'):
+            last_error = telegram_helper.escape_special_chars(cache_info['last_error']['msg'])
+            notified_down_time = cache_info.get('notified_down')
+            site_name_escaped = telegram_helper.escape_special_chars(site_name)
+
+            if notified_down_time:
+                minutes_down = round((int(time.time()) - notified_down_time) / 60)
+                services_down.append(
+                    f"🔴 _{site_name_escaped}_\n"
+                    f"   Error: {last_error}\n"
+                    f"   Down for: *{minutes_down}* minutes \\({failed_attempts} failed checks\\)"
+                )
+
+    if not services_down:
+        services_down_text = "🟢 *All services are operational*"
+    else:
+        services_down_text = "\n\n".join(services_down)
+
+    timestamp = telegram_helper.escape_special_chars(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    return messages['summary'].format(
+        services_down=services_down_text,
+        server_info=get_server_info(),
+        timestamp=timestamp
+    ).strip()
+
+
+def generate_summary_msg1(down_sites: list[tuple[str, str]], messages: dict[str, str]) -> str:
+    if 'summary' in messages:
+        services_block = '\n'.join(
+            f"- {telegram_helper.escape_special_chars(name)} — {telegram_helper.escape_special_chars(err)}"
+            for name, err in down_sites
+        )
+
+        return messages['summary'].format(services=services_block, server_info=get_server_info()).strip()
+
+    header = telegram_helper.escape_special_chars('DAILY DOWNTIME SUMMARY')
+    services_block = '\n'.join(
+        f"- {telegram_helper.escape_special_chars(name)} — {telegram_helper.escape_special_chars(err)}"
+        for name, err in down_sites
+    )
+    return f"*{header}*\n\n{services_block}\n\n{get_server_info()}"
+
+
+def should_send_summary(config: dict) -> bool:
+    """Check if it's time to send summary based on summary_schedule"""
+    if 'summary_schedule' not in config:
+        return False
+
+    schedule = config['summary_schedule']
+    base_time = datetime.now().replace(second=0, microsecond=0)
+
+    try:
+        cron = croniter(schedule, base_time)
+        return cron.get_prev(datetime) == base_time or cron.get_next(datetime) == base_time
+    except (CroniterBadCronError, CroniterBadDateError):
+        return False
+
+
+def send_summary_if_due(config, cache: dict, messages):
+    """Send summary report if scheduled time has come and there are services down"""
+
+    if not should_send_summary(config):
+        return
+
+    # Check if there are any services currently down
+    has_services_down = False
+    for site_name, cache_info in cache.items():
+        if site_name not in config['sites']:
+            continue
+
+        site = config['sites'][site_name]
+        notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
+        failed_attempts = cache_info.get('failed_attempts', 0)
+
+        if failed_attempts >= notify_after_attempt and cache_info.get('last_error'):
+            has_services_down = True
+            break
+
+    # Only send summary if there are services down
+    if has_services_down:
+        summary_msg = generate_summary_msg(messages, cache, config)
+
+        # Collect all unique chat IDs from all sites
+        all_chat_ids = set()
+        for site in config['sites'].values():
+            all_chat_ids.update(get_uniq_chat_ids(site['tg_chats_to_notify']))
+
+        # Send summary to all chat IDs
+        for chat_id in all_chat_ids:
+            telegram_helper.send_message(config['telegram_bot_token'], chat_id, summary_msg)
+
+        color_text("Summary report sent", Color.SUCCESS)
 
 
 if __name__ == "__main__":
