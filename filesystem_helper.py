@@ -1,9 +1,35 @@
+import fcntl
 import json
 import os
-import platform
+from typing import Optional, TextIO
 from typing import Protocol, runtime_checkable, cast
 
 import yaml
+
+_lock_file_handle: Optional[TextIO] = None
+
+
+def acquire_singleton_lock(lock_path: str):
+    global _lock_file_handle
+    _lock_file_handle = open(lock_path, "w")
+
+    try:
+        fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        exit("Another instance is already running. Exiting.")
+
+    return _lock_file_handle
+
+
+def release_singleton_lock():
+    global _lock_file_handle
+
+    if _lock_file_handle is not None:
+        try:
+            fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            _lock_file_handle.close()
+            _lock_file_handle = None
 
 
 def load_yaml_or_exit(file_name: str):
@@ -21,25 +47,15 @@ class Writer(Protocol):
     def write(self, __s: str) -> int: ...
 
 
-def get_cache_path():
-    if platform.system() == 'Windows':
-        base_dir = os.environ.get('TEMP') or os.environ.get('TMP') or 'C:\\Temp'
-    else:
-        base_dir = '/tmp'
-
-    return os.path.join(base_dir, 'self-hosted-tg-alert-sites-monitoring-tool.json')
-
-
-def load_cache():
-    path = get_cache_path()
-
+def load_cache(path: str):
     if not os.path.isfile(path):
         return {}
+
     with open(path, 'r') as f:
         return json.load(f)
 
 
-def save_cache(cache: dict) -> None:
-    with open(get_cache_path(), 'w', encoding='utf-8') as f:
+def save_cache(path: str, cache: dict) -> None:
+    with open(path, 'w', encoding='utf-8') as f:
         writer = cast(Writer, f)
         json.dump(cache, writer, indent=2)

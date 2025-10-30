@@ -12,10 +12,13 @@ from croniter import croniter, CroniterBadCronError, CroniterBadDateError
 
 import telegram_helper
 from console_helper import Color, color_text
-from filesystem_helper import save_cache, load_yaml_or_exit, load_cache, get_cache_path
+from filesystem_helper import save_cache, load_yaml_or_exit, load_cache, acquire_singleton_lock, release_singleton_lock
 
-CONFIG_FILE_NAME = 'config.yaml'
-MESSAGES_FILE_NAME = 'messages.yaml'
+CONFIG_PATH = 'config.yaml'
+MESSAGES_PATH = 'messages.yaml'
+LOCK_PATH = '/tmp/self-hosted-tg-alert-sites-monitoring-tool.lock'
+CACHE_PATH = '/tmp/self-hosted-tg-alert-sites-monitoring-tool.json'
+
 REQUIRED_FIELDS = ['url', 'tg_chats_to_notify']
 DEFAULT = {
     'timeout': 5,
@@ -40,20 +43,23 @@ class RequestMethod(Enum):
 certificate_cache = {}
 
 
-def get_certificate_expiry_with_cache(hostname: str, port: int = 443) -> dict:
-    cache_key = '{}:{}'.format(hostname, port)
+def get_certificate_expiry_with_cache(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
+    cache_key = f"{hostname}:{port}:{timeout}"
 
     if cache_key not in certificate_cache:
-        certificate_cache[cache_key] = get_certificate_expiry(hostname, port)
+        certificate_cache[cache_key] = get_certificate_expiry(hostname, port, timeout)
 
     return certificate_cache[cache_key]
 
 
-def get_certificate_expiry(hostname: str, port: int = 443) -> dict:
+def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
     try:
         context = ssl.create_default_context()
 
-        with socket.create_connection((hostname, port)) as sock:
+        # hard timeout on TCP connect
+        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)  # also cap the SSL handshake
+
             with context.wrap_socket(sock, server_hostname=hostname) as ssock:
                 cert = ssock.getpeercert()
 
@@ -61,11 +67,19 @@ def get_certificate_expiry(hostname: str, port: int = 443) -> dict:
         not_after = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
 
         return {
-            'issuer': cert['issuer'],
+            'issuer': cert.get('issuer'),
             'not_before': not_before,
             'not_after': not_after,
             'is_valid': not_before <= datetime.now(tz=timezone.utc) <= not_after,
-            'error': None
+            'error': None,
+        }
+    except (socket.timeout, TimeoutError) as e:
+        return {
+            'issuer': None,
+            'not_before': None,
+            'not_after': None,
+            'is_valid': None,
+            'error': f"SSL check timeout after {timeout}s: {e}",
         }
     except Exception as e:
         return {
@@ -149,7 +163,7 @@ def perform_request(url: str,
     if url.startswith('https://'):
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
-        cert = get_certificate_expiry_with_cache(hostname, parsed_url.port if parsed_url.port else 443)
+        cert = get_certificate_expiry_with_cache(hostname, parsed_url.port if parsed_url.port else 443, float(timeout))
 
         if cert['error']:
             return f"SSL certificate error: {cert['error']}"
@@ -199,9 +213,9 @@ def get_uniq_chat_ids(chat_ids):
 
 def check_writing_to_cache():
     try:
-        save_cache({})
+        save_cache(CACHE_PATH, {})
     except Exception as e:
-        color_text(f"Error saving cache, check permissions: {get_cache_path()}\n{e}", Color.ERROR)
+        color_text(f"Error saving cache, check permissions: {CACHE_PATH}\n{e}", Color.ERROR)
 
         return False
 
@@ -318,83 +332,98 @@ def is_valid_cron(schedule: str) -> bool:
 
 
 def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Run site monitoring script.')
-    parser.add_argument('--test-notifications',
-                        action='store_true',
-                        help='Test sending messages to all Telegram chats found in the config file')
-    parser.add_argument('--id-bot-mode',
-                        action='store_true',
-                        help='A bot that replies with the user ID using long polling')
-    parser.add_argument('--force',
-                        action='store_true',
-                        help='Force check all sites immediately, regardless of the schedule')
-    parser.add_argument('--check-config',
-                        action='store_true',
-                        help='Check configuration for each site and display missing or default values')
-    args = parser.parse_args()
+    # noinspection PyUnusedLocal
+    lock = acquire_singleton_lock(LOCK_PATH)
 
-    config = load_yaml_or_exit(CONFIG_FILE_NAME)
-    messages = load_yaml_or_exit(MESSAGES_FILE_NAME)
+    try:
+        # Parse command-line arguments
+        parser = argparse.ArgumentParser(description='Run site monitoring script.')
+        parser.add_argument(
+            '--test-notifications',
+            action='store_true',
+            help='Test sending messages to all Telegram chats found in the config file'
+        )
+        parser.add_argument(
+            '--id-bot-mode',
+            action='store_true',
+            help='A bot that replies with the user ID using long polling'
+        )
+        parser.add_argument(
+            '--force',
+            action='store_true',
+            help='Force check all sites immediately, regardless of the schedule'
+        )
+        parser.add_argument(
+            '--check-config',
+            action='store_true',
+            help='Check configuration for each site and display missing or default values'
+        )
 
-    if args.test_notifications:
-        telegram_helper.test_notifications(config, get_uniq_chat_ids)
-        check_writing_to_cache()
-    elif args.id_bot_mode:
-        telegram_helper.id_bot(config)
-        check_writing_to_cache()
-    elif args.check_config:
-        check_config(config)
-        check_writing_to_cache()
-    else:
-        cache = load_cache()
-        process_each_site(config, cache, force=args.force)
-        save_cache(cache)
-        process_cache(cache, config, messages)
-        send_summary_if_due(config, cache, messages)
-        save_cache(cache)
+        args = parser.parse_args()
+        config = load_yaml_or_exit(CONFIG_PATH)
+        messages = load_yaml_or_exit(MESSAGES_PATH)
+
+        if args.test_notifications:
+            telegram_helper.test_notifications(config, get_uniq_chat_ids)
+            check_writing_to_cache()
+        elif args.id_bot_mode:
+            telegram_helper.id_bot(config)
+            check_writing_to_cache()
+        elif args.check_config:
+            check_config(config)
+            check_writing_to_cache()
+        else:
+            cache = load_cache(CACHE_PATH)
+            process_each_site(config, cache, force=args.force)
+            save_cache(CACHE_PATH, cache)
+            process_cache(cache, config, messages)
+            send_summary_if_due(config, cache, messages)
+            save_cache(CACHE_PATH, cache)
+    finally:
+        release_singleton_lock()
 
 
 def process_cache(cache, config, messages):
     for site_name, cache_info in cache.items():
-        failed_attempts = cache_info.get('failed_attempts', 0)
-
         if site_name not in config['sites']:
             continue
 
         site = config['sites'][site_name]
         notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
 
-        if failed_attempts > 0 and time.time() - cache_info['last_checked_at'] >= 59:
-            process_site(site, site_name, cache)
-
+        failed_attempts = cache_info.get('failed_attempts', 0)
         notified_down = cache_info.get('notified_down', None)
         notified_restore = cache_info.get('notified_restore', None)
+        last_error = cache_info.get('last_error')
 
-        if failed_attempts >= notify_after_attempt and not notified_down and cache_info['last_error'] is not None:
-            tg_error_msg = generate_tg_error_msg(messages,
-                                                 cache_info['last_error']['msg'],
-                                                 site_name=cache_info['last_error']['site_name'],
-                                                 url=cache_info['last_error']['url'],
-                                                 follow_redirects=cache_info['last_error']['follow_redirects'],
-                                                 method=cache_info['last_error']['method'],
-                                                 timeout=cache_info['last_error']['timeout'],
-                                                 post_data=cache_info['last_error']['post_data'],
-                                                 headers=cache_info['last_error']['headers'],
-                                                 count=failed_attempts)
-
+        # Send initial DOWN alert once
+        if failed_attempts >= notify_after_attempt and not notified_down and last_error is not None:
+            tg_error_msg = generate_tg_error_msg(
+                messages,
+                last_error['msg'],
+                site_name=last_error['site_name'],
+                url=last_error['url'],
+                follow_redirects=last_error['follow_redirects'],
+                method=last_error['method'],
+                timeout=last_error['timeout'],
+                post_data=last_error['post_data'],
+                headers=last_error['headers'],
+                count=failed_attempts,
+            )
             for chat_id in get_uniq_chat_ids(site['tg_chats_to_notify']):
                 telegram_helper.send_message(config['telegram_bot_token'], chat_id, tg_error_msg)
 
             cache_info['notified_down'] = int(time.time())
-            cache_info['failed_attempts'] = failed_attempts
             cache_info['notified_restore'] = None
-        elif cache_info['last_error'] is None and notified_down and not notified_restore:
-            msg = generate_back_online_msg(messages=messages,
-                                           site_name=site_name,
-                                           failed_attempts=cache_info['failed_attempts'],
-                                           down_timestamp=cache_info['notified_down'])
 
+        # Send RESTORE alert once
+        elif last_error is None and notified_down and not notified_restore:
+            msg = generate_back_online_msg(
+                messages=messages,
+                site_name=site_name,
+                failed_attempts=cache_info.get('failed_attempts', 0),
+                down_timestamp=notified_down,
+            )
             for chat_id in get_uniq_chat_ids(site['tg_chats_to_notify']):
                 telegram_helper.send_message(config['telegram_bot_token'], chat_id, msg)
 
