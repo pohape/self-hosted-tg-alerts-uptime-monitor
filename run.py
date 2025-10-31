@@ -197,9 +197,11 @@ def perform_request(url: str,
             return f"SSL certificate has expired or is not yet valid: {cert['not_before']} - {cert['not_after']}"
 
         if cert['time_taken'] > 0:
-            print(f"SSL check time for {hostname}: {cert['time_taken']} seconds")
+            color_text(f"SSL check time for {hostname}: {cert['time_taken']} seconds", Color.QUOTATION)
 
     try:
+        start_time = time.time()
+
         if method == RequestMethod.GET:
             res = requests.get(url, timeout=timeout, headers=headers, allow_redirects=follow_redirects)
         elif method == RequestMethod.POST:
@@ -208,6 +210,9 @@ def perform_request(url: str,
             res = requests.head(url, timeout=timeout, headers=headers, allow_redirects=follow_redirects)
         else:
             return 'Invalid request method.'
+
+        elapsed_time = round(time.time() - start_time, 2)
+        color_text(f"{method.value} request time for {url}: {elapsed_time} seconds", Color.QUOTATION)
 
         if res.status_code != status_code:
             return f"Expected status code '{status_code}', but got '{res.status_code}'"
@@ -498,8 +503,6 @@ def process_site(site, site_name: str, cache: dict):
     else:
         cache[site_name]['last_checked_at'] = int(time.time())
 
-    color_text(site_name + ':', Color.QUOTATION)
-
     if error_message:
         if cache[site_name]['failed_attempts'] == 0:
             cache[site_name]['failed_attempts'] = 1
@@ -522,7 +525,7 @@ def process_site(site, site_name: str, cache: dict):
         color_text(error_message, Color.ERROR)
     else:
         cache[site_name]['last_error'] = None
-        color_text(f"Request completed successfully", Color.SUCCESS)
+        color_text(f"{site_name} completed successfully\n", Color.SUCCESS)
 
 
 def process_each_site(config, cache: dict, force=False):
