@@ -52,43 +52,64 @@ def get_certificate_expiry_with_cache(hostname: str, port: int = 443, timeout: f
     return certificate_cache[cache_key]
 
 
-def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
-    try:
-        context = ssl.create_default_context()
+def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 1.0) -> dict:
+    connect_timeout = float(timeout)
 
-        # hard timeout on TCP connect
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)  # also cap the SSL handshake
+    if connect_timeout > 1.0:
+        connect_timeout = 1.0
 
-            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    last_err = None
 
-        not_before = datetime.strptime(cert['notBefore'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
-        not_after = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            addrs = socket.getaddrinfo(hostname, port, family, socket.SOCK_STREAM)
+        except Exception as e:
+            last_err = e
 
-        return {
-            'issuer': cert.get('issuer'),
-            'not_before': not_before,
-            'not_after': not_after,
-            'is_valid': not_before <= datetime.now(tz=timezone.utc) <= not_after,
-            'error': None,
-        }
-    except (socket.timeout, TimeoutError) as e:
-        return {
-            'issuer': None,
-            'not_before': None,
-            'not_after': None,
-            'is_valid': None,
-            'error': f"SSL check timeout after {timeout}s: {e}",
-        }
-    except Exception as e:
-        return {
-            'issuer': None,
-            'not_before': None,
-            'not_after': None,
-            'is_valid': None,
-            'error': str(e)
-        }
+            continue
+
+        for af, socktype, proto, _canon, sa in addrs:
+            sock = None
+
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.settimeout(connect_timeout)
+                sock.connect(sa)
+
+                with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+
+                sock = None
+                not_before = datetime.strptime(cert['notBefore'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
+                not_after = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
+
+                return {
+                    'issuer': cert.get('issuer'),
+                    'not_before': not_before,
+                    'not_after': not_after,
+                    'is_valid': not_before <= datetime.now(tz=timezone.utc) <= not_after,
+                    'error': None,
+                }
+            except Exception as e:
+                last_err = e
+            finally:
+                # noinspection PyBroadException
+                try:
+                    if sock is not None:
+                        sock.close()
+                except Exception:
+                    pass
+
+    return {
+        'issuer': None,
+        'not_before': None,
+        'not_after': None,
+        'is_valid': None,
+        'error': str(last_err) if last_err else "TLS precheck failed",
+    }
 
 
 def get_server_info():
