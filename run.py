@@ -48,11 +48,14 @@ def get_certificate_expiry_with_cache(hostname: str, port: int = 443, timeout: f
 
     if cache_key not in certificate_cache:
         certificate_cache[cache_key] = get_certificate_expiry(hostname, port, timeout)
+    else:
+        certificate_cache[cache_key]['time_taken'] = 0.0  # Indicate cached result with zero time taken
 
     return certificate_cache[cache_key]
 
 
 def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 1.0) -> dict:
+    start_time = time.time()
     connect_timeout = float(timeout)
 
     if connect_timeout > 1.0:
@@ -87,6 +90,7 @@ def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 1.0)
                 not_after = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y GMT").replace(tzinfo=timezone.utc)
 
                 return {
+                    'time_taken': round(time.time() - start_time, 2),
                     'issuer': cert.get('issuer'),
                     'not_before': not_before,
                     'not_after': not_after,
@@ -104,6 +108,7 @@ def get_certificate_expiry(hostname: str, port: int = 443, timeout: float = 1.0)
                     pass
 
     return {
+        'time_taken': round(time.time() - start_time, 2),
         'issuer': None,
         'not_before': None,
         'not_after': None,
@@ -190,6 +195,9 @@ def perform_request(url: str,
             return f"SSL certificate error: {cert['error']}"
         elif not cert['is_valid']:
             return f"SSL certificate has expired or is not yet valid: {cert['not_before']} - {cert['not_after']}"
+
+        if cert['time_taken'] > 0:
+            print(f"SSL check time for {hostname}: {cert['time_taken']} seconds")
 
     try:
         if method == RequestMethod.GET:
