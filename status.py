@@ -8,7 +8,6 @@ It only reads:
   - the JSON cache file (to know last check results)
 and prints a human-readable status to the terminal.
 """
-
 import argparse
 import time
 from datetime import datetime
@@ -16,13 +15,7 @@ from typing import Any, Dict, Optional
 
 from console_helper import Color, color_text
 from filesystem_helper import load_yaml_or_exit, load_cache
-
-# Try to reuse paths from run.py if available, fall back to hardcoded defaults.
-try:
-    from run import CACHE_PATH as DEFAULT_CACHE_PATH, CONFIG_PATH as DEFAULT_CONFIG_PATH  # type: ignore[attr-defined]
-except Exception:
-    DEFAULT_CACHE_PATH = "/tmp/self-hosted-tg-alert-sites-monitoring-tool.json"
-    DEFAULT_CONFIG_PATH = "config.yaml"
+from run import CACHE_PATH, CONFIG_PATH
 
 
 def human_time(ts: Optional[int]) -> str:
@@ -54,11 +47,7 @@ def human_age(ts: Optional[int]) -> str:
     return f"{days}d ago"
 
 
-def determine_state(
-        site_name: str,
-        site_cfg: Dict[str, Any],
-        cache_entry: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+def determine_state(site_cfg: Dict[str, Any], cache_entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Determine logical state for a site based on its cache entry.
 
@@ -162,16 +151,6 @@ def main() -> None:
         description="Show current status of monitored sites based on the cache file."
     )
     parser.add_argument(
-        "--cache-path",
-        default=DEFAULT_CACHE_PATH,
-        help=f"Path to the cache JSON file (default: {DEFAULT_CACHE_PATH})",
-    )
-    parser.add_argument(
-        "--config-path",
-        default=DEFAULT_CONFIG_PATH,
-        help=f"Path to config.yaml (default: {DEFAULT_CONFIG_PATH})",
-    )
-    parser.add_argument(
         "--only-down",
         action="store_true",
         help="Show only sites that are DOWN or UNSTABLE.",
@@ -179,24 +158,24 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    config = load_yaml_or_exit(args.config_path)
-    cache = load_cache(args.cache_path)
-
+    config = load_yaml_or_exit(CONFIG_PATH)
+    cache = load_cache(CACHE_PATH)
     sites = config.get("sites", {})
+
     if not sites:
         color_text("No sites defined in config.yaml", Color.ERROR)
         return
 
     color_text("=== CURRENT MONITORING STATUS ===", Color.TITLE)
-    print(f"Config: {args.config_path}")
-    print(f"Cache:  {args.cache_path}")
+    print(f"Config: {CONFIG_PATH}")
+    print(f"Cache:  {CACHE_PATH}")
     print()
 
     status_counts: Dict[str, int] = {"UP": 0, "DOWN": 0, "UNSTABLE": 0, "UNKNOWN": 0}
 
     for site_name, site_cfg in sites.items():
         cache_entry = cache.get(site_name)
-        state_info = determine_state(site_name, site_cfg, cache_entry)
+        state_info = determine_state(site_cfg, cache_entry)
         state = state_info["state"]
         status_counts[state] = status_counts.get(state, 0) + 1
 
