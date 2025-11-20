@@ -51,8 +51,12 @@ def load_cache(path: str):
     if not os.path.isfile(path):
         return {}
 
-    with open(path, 'r') as f:
-        return json.load(f)
+    # noinspection PyBroadException
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def save_cache(path: str, cache: dict) -> None:
