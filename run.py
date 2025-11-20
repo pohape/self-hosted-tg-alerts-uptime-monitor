@@ -460,7 +460,7 @@ def main():
             if args.debug:
                 color_text(f"[DEBUG] Cache loaded from {CACHE_PATH}, entries={len(cache)}", Color.QUOTATION)
 
-            process_each_site(config, cache, force=args.force)
+            process_each_site(args, config, cache, force=args.force)
 
             if args.debug:
                 color_text(f"[DEBUG] process_each_site() finished", Color.QUOTATION)
@@ -609,10 +609,91 @@ def process_site(site, site_name: str, cache: dict):
         color_text(f"{site_name} completed successfully\n", Color.SUCCESS)
 
 
-def process_each_site(config, cache: dict, force=False):
-    for site_name, site in config['sites'].items():
-        if force or should_run(site.get('schedule', DEFAULT['schedule'])):
+def process_each_site(args, config, cache: dict, force=False) -> int:
+    """
+    Process all sites according to their schedules AND current error state.
+
+    Behavior:
+      - If force=True: check every site unconditionally.
+      - Else:
+          * If schedule matches now (should_run == True) -> check.
+          * If the site currently has last_error in cache -> check
+            on every run, regardless of schedule (DOWN/UNSTABLE retry).
+          * Otherwise -> skip.
+
+    Returns:
+        int: number of sites that were actually processed.
+    """
+    sites = config.get('sites', {})
+
+    if args.debug:
+        color_text(
+            f"[DEBUG] process_each_site(): total sites in config={len(sites)}, force={force}",
+            Color.QUOTATION,
+        )
+
+    processed_count = 0
+    skipped_count = 0
+
+    for site_name, site in sites.items():
+        schedule = site.get('schedule', DEFAULT['schedule'])
+        cache_entry = cache.get(site_name, {})
+
+        last_error = cache_entry.get('last_error')
+        has_error = last_error not in (None, "", {})  # treat any non-empty last_error as a problem
+
+        run_reason = None  # "force" | "schedule" | "down"
+
+        if force:
+            run_reason = "force"
+        else:
+            # Evaluate schedule
+            run_by_schedule = False
+            try:
+                run_by_schedule = should_run(schedule)
+            except Exception as e:
+                if args.debug:
+                    color_text(
+                        f"[DEBUG] process_each_site(): ERROR evaluating schedule for '{site_name}' "
+                        f"(schedule='{schedule}'): {e!r}",
+                        Color.ERROR,
+                    )
+
+            # New behavior:
+            # - If the site currently has an error -> we want to retry it every run.
+            # - Otherwise fall back to schedule.
+            if has_error:
+                run_reason = "down"
+            elif run_by_schedule:
+                run_reason = "schedule"
+
+        if run_reason is not None:
+            if args.debug:
+                color_text(
+                    f"[DEBUG] process_each_site(): running '{site_name}' "
+                    f"(reason={run_reason}, schedule='{schedule}', has_error={has_error})",
+                    Color.QUOTATION,
+                )
+
             process_site(site, site_name, cache)
+            processed_count += 1
+        else:
+            skipped_count += 1
+
+            if args.debug:
+                color_text(
+                    f"[DEBUG] process_each_site(): skipping '{site_name}' "
+                    f"(schedule='{schedule}', has_error={has_error})",
+                    Color.QUOTATION,
+                )
+
+    if args.debug:
+        color_text(
+            f"[DEBUG] process_each_site(): done, processed={processed_count}, skipped={skipped_count}",
+            Color.QUOTATION,
+        )
+
+    return processed_count
 
 
 def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) -> str:
