@@ -366,54 +366,135 @@ def is_valid_cron(schedule: str) -> bool:
 
 
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Run site monitoring script.')
+    parser.add_argument(
+        '--test-notifications',
+        action='store_true',
+        help='Test sending messages to all Telegram chats found in the config file'
+    )
+    parser.add_argument(
+        '--id-bot-mode',
+        action='store_true',
+        help='A bot that replies with the user ID using long polling'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force check all sites immediately, regardless of the schedule'
+    )
+    parser.add_argument(
+        '--check-config',
+        action='store_true',
+        help='Check configuration for each site and display missing or default values'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Debug mode'
+    )
+
+    args = parser.parse_args()
+
+    if args.debug:
+        color_text(f"[DEBUG] Parsed args: {args}", Color.QUOTATION)
+        color_text(f"[DEBUG] Trying to acquire lock: {LOCK_PATH}", Color.QUOTATION)
+
     # noinspection PyUnusedLocal
     lock = acquire_singleton_lock(LOCK_PATH)
 
-    try:
-        # Parse command-line arguments
-        parser = argparse.ArgumentParser(description='Run site monitoring script.')
-        parser.add_argument(
-            '--test-notifications',
-            action='store_true',
-            help='Test sending messages to all Telegram chats found in the config file'
-        )
-        parser.add_argument(
-            '--id-bot-mode',
-            action='store_true',
-            help='A bot that replies with the user ID using long polling'
-        )
-        parser.add_argument(
-            '--force',
-            action='store_true',
-            help='Force check all sites immediately, regardless of the schedule'
-        )
-        parser.add_argument(
-            '--check-config',
-            action='store_true',
-            help='Check configuration for each site and display missing or default values'
-        )
+    if args.debug:
+        color_text("[DEBUG] Lock acquired successfully", Color.SUCCESS)
+        color_text(f"[DEBUG] Loading config from {CONFIG_PATH}", Color.QUOTATION)
 
-        args = parser.parse_args()
+    try:
         config = load_yaml_or_exit(CONFIG_PATH)
+
+        if args.debug:
+            color_text("[DEBUG] Config loaded successfully", Color.SUCCESS)
+
+        if args.debug:
+            color_text(f"[DEBUG] Loading messages from {MESSAGES_PATH}", Color.QUOTATION)
+
         messages = load_yaml_or_exit(MESSAGES_PATH)
 
+        if args.debug:
+            color_text("[DEBUG] Messages loaded successfully", Color.SUCCESS)
+
         if args.test_notifications:
+            if args.debug:
+                color_text("[DEBUG] Entering --test-notifications mode", Color.TITLE)
+
             telegram_helper.test_notifications(config, get_uniq_chat_ids)
             check_writing_to_cache()
+
+            if args.debug:
+                color_text("[DEBUG] Finished --test-notifications mode", Color.TITLE)
+
         elif args.id_bot_mode:
+            if args.debug:
+                color_text("[DEBUG] Entering --id-bot-mode", Color.TITLE)
+
             telegram_helper.id_bot(config)
             check_writing_to_cache()
+
+            if args.debug:
+                color_text("[DEBUG] Exiting --id-bot-mode (this usually runs until interrupted)", Color.TITLE)
+
         elif args.check_config:
+            if args.debug:
+                color_text("[DEBUG] Entering --check-config mode", Color.TITLE)
+
             check_config(config)
             check_writing_to_cache()
+
+            if args.debug:
+                color_text("[DEBUG] Finished --check-config mode", Color.TITLE)
+
         else:
+            if args.debug:
+                color_text("[DEBUG] Entering normal monitoring mode", Color.TITLE)
+
             cache = load_cache(CACHE_PATH)
+
+            if args.debug:
+                color_text(f"[DEBUG] Cache loaded from {CACHE_PATH}, entries={len(cache)}", Color.QUOTATION)
+
             process_each_site(config, cache, force=args.force)
+
+            if args.debug:
+                color_text(f"[DEBUG] process_each_site() finished", Color.QUOTATION)
+
             save_cache(CACHE_PATH, cache)
+
+            if args.debug:
+                color_text("[DEBUG] Cache saved after process_each_site()", Color.QUOTATION)
+
             process_cache(cache, config, messages)
+
+            if args.debug:
+                color_text("[DEBUG] process_cache() finished", Color.QUOTATION)
+
             send_summary_if_due(config, cache, messages)
+
+            if args.debug:
+                color_text("[DEBUG] send_summary_if_due() finished", Color.QUOTATION)
+
             save_cache(CACHE_PATH, cache)
+
+            if args.debug:
+                color_text("[DEBUG] Cache saved after send_summary_if_due()", Color.QUOTATION)
+
+        if args.debug:
+            color_text(
+                f"[DEBUG] main() finished normally at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                Color.TITLE,
+            )
+
     finally:
+        if args.debug:
+            color_text("[DEBUG] Releasing lock and exiting main()", Color.QUOTATION)
+
         release_singleton_lock()
 
 
