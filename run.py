@@ -24,7 +24,7 @@ DEFAULT = {
     'timeout': 5,
     'schedule': '* * * * *',
     'method': 'GET',
-    'status_code': 200,
+    'status_code': [200],
     'post_data': None,
     'search_string': '',
     'absent_string': '',
@@ -180,7 +180,7 @@ def generate_tg_error_msg(messages: dict[str, str],
 def perform_request(url: str,
                     follow_redirects: bool,
                     method: RequestMethod,
-                    status_code: int,
+                    status_codes: list[int],
                     search: str,
                     absent: str,
                     timeout: int,
@@ -213,9 +213,10 @@ def perform_request(url: str,
 
         elapsed_time = round(time.time() - start_time, 2)
         color_text(f"{method.value} request time for {url}: {elapsed_time} seconds", Color.QUOTATION)
+        color_text(f"Response status code: {res.status_code}, expected: {status_codes}", Color.QUOTATION)
 
-        if res.status_code != status_code:
-            return f"Expected status code '{status_code}', but got '{res.status_code}'"
+        if res.status_code not in status_codes:
+            return f"Expected status code {status_codes}, but got '{res.status_code}'"
 
         # Only for GET/POST: validate content
         if method in {RequestMethod.GET, RequestMethod.POST}:
@@ -561,11 +562,14 @@ def process_site(site, site_name: str, cache: dict):
     post_data: str | None = cast(str, site.get('post_data', DEFAULT['post_data']))
     headers = site.get('headers', DEFAULT['headers'])
 
+    raw_status_code = site.get('status_code', DEFAULT['status_code'])
+    status_codes = raw_status_code if isinstance(raw_status_code, list) else [raw_status_code]
+
     error_message = perform_request(
         url=site['url'],
         follow_redirects=follow_redirects,
         method=method,
-        status_code=site.get('status_code', DEFAULT['status_code']),
+        status_codes=status_codes,
         search=site.get('search_string', DEFAULT['search_string']),
         absent=site.get('absent_string', DEFAULT['absent_string']),
         timeout=timeout,
