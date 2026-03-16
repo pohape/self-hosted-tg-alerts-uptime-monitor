@@ -1,3 +1,4 @@
 error: "_{site_name}_:\n*{error}*\n\n{server_info}\n\nTo replicate the request, you can use the following cURL command:\n```sh\n{curl}```Failed *{count}* times in a row\\. You will be notified when it's back online\\."
+command_error: "_{name}_:\n*{error}*\n\n{server_info}\n\nCommand:\n```sh\n{command}```Failed *{count}* times in a row\\. You will be notified when it's back online\\."
 back_online: "*{site_name}* is back online after *{failed_attempts}* failed checks and *{minutes}* minutes_{server_info}_"
 summary: "*Summary Report*\n\n{services_down}\n\n{server_info}\n\n_Generated at {timestamp}_"

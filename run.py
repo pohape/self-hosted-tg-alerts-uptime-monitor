@@ -1,6 +1,7 @@
 import argparse
 import socket
 import ssl
+import subprocess
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -20,6 +21,7 @@ LOCK_PATH = '/tmp/self-hosted-tg-alert-sites-monitoring-tool.lock'
 CACHE_PATH = '/tmp/self-hosted-tg-alert-sites-monitoring-tool.json'
 
 REQUIRED_FIELDS = ['url', 'tg_chats_to_notify']
+COMMAND_REQUIRED_FIELDS = ['command', 'tg_chats_to_notify']
 DEFAULT = {
     'timeout': 5,
     'schedule': '* * * * *',
@@ -30,6 +32,14 @@ DEFAULT = {
     'absent_string': '',
     'headers': {},
     'follow_redirects': False,
+    'notify_after_attempt': 1,
+}
+COMMAND_DEFAULT = {
+    'timeout': 30,
+    'schedule': '* * * * *',
+    'search_string': '',
+    'absent_string': '',
+    'min_value': None,
     'notify_after_attempt': 1,
 }
 
@@ -195,8 +205,7 @@ def perform_request(url: str,
             return f"SSL certificate error: {cert['error']}"
         elif not cert['is_valid']:
             return f"SSL certificate has expired or is not yet valid: {cert['not_before']} - {cert['not_after']}"
-
-        if cert['time_taken'] > 0:
+        elif cert['time_taken'] > 0:
             color_text(f"SSL check time for {hostname}: {cert['time_taken']} seconds", Color.QUOTATION)
 
     try:
@@ -217,18 +226,54 @@ def perform_request(url: str,
 
         if res.status_code not in status_codes:
             return f"Expected status code {status_codes}, but got '{res.status_code}'"
-
-        # Only for GET/POST: validate content
-        if method in {RequestMethod.GET, RequestMethod.POST}:
+        elif method in {RequestMethod.GET, RequestMethod.POST}:  # Only for GET/POST: validate content
             if search and search not in res.text:
                 return f"The expected string '{search}' was not found in the response."
-            if absent and absent in res.text:
+            elif absent and absent in res.text:
                 return f"The forbidden string '{absent}' was found in the response."
 
         return None
 
     except requests.exceptions.RequestException as e:
         return f'An error occurred: {e}'
+
+
+def perform_command(command: str, timeout: int, search: str, absent: str, min_value) -> str | None:
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"Command timed out after {timeout}s"
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()[:200]
+        return f"Command exited with code {result.returncode}: {stderr}"
+
+    output = result.stdout.strip()
+
+    if search and search not in output:
+        return f"Expected '{search}' not found in output: '{output}'"
+    elif absent and absent in output:
+        return f"Forbidden '{absent}' found in output: '{output}'"
+    elif min_value is not None:
+        try:
+            val = int(output)
+
+            if val < min_value:
+                return f"Value {val} is below minimum {min_value}"
+        except ValueError:
+            return f"Expected numeric output, got: '{output}'"
+
+    return None
+
+
+def generate_tg_command_error_msg(messages: dict[str, str], err: str, name: str, command: str, count: int):
+    return messages['command_error'].format(
+        name=telegram_helper.escape_special_chars(name),
+        error=telegram_helper.escape_special_chars(err),
+        server_info=get_server_info(),
+        count=count,
+        command=command,
+    ).strip()
 
 
 def should_run(schedule: str) -> bool:
@@ -261,11 +306,7 @@ def check_config(config):
     report = {}
 
     for site_name, site in config['sites'].items():
-        report[site_name] = {
-            Color.ERROR: {},
-            Color.WARNING: {},
-            Color.SUCCESS: {},
-        }
+        report[site_name] = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
 
         for field_name in REQUIRED_FIELDS:
             if field_name not in site:
@@ -321,17 +362,48 @@ def check_config(config):
             else:
                 report[site_name][Color.WARNING][field_name] = f"not found, default value is '{DEFAULT[field_name]}'"
 
+    # Validate commands
+    for cmd_name, cmd in config.get('commands', {}).items():
+        report[cmd_name] = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
+
+        if cmd_name in config.get('sites', {}):
+            report[cmd_name][Color.ERROR]['name'] = 'conflicts with a site of the same name'
+
+        for field_name in COMMAND_REQUIRED_FIELDS:
+            if field_name not in cmd:
+                report[cmd_name][Color.ERROR][field_name] = 'required field not found, you need to add it'
+            elif field_name == 'tg_chats_to_notify':
+                chat_id_list = cmd[field_name]
+                if not isinstance(chat_id_list, list):
+                    report[cmd_name][Color.ERROR][field_name] = 'must be a list of at least one chat ID'
+                elif not all(check_chat_id_validity(cid) for cid in chat_id_list) or not chat_id_list:
+                    report[cmd_name][Color.ERROR][field_name] = 'chat IDs must contain only digits'
+                else:
+                    report[cmd_name][Color.SUCCESS][field_name] = ', '.join(get_uniq_chat_ids(chat_id_list))
+            else:
+                report[cmd_name][Color.SUCCESS][field_name] = cmd[field_name]
+
+        for field_name in COMMAND_DEFAULT:
+            if field_name in cmd:
+                if field_name == 'schedule' and not is_valid_cron(cmd['schedule']):
+                    report[cmd_name][Color.ERROR][field_name] = f"invalid cron syntax: '{cmd['schedule']}'"
+                else:
+                    report[cmd_name][Color.SUCCESS][field_name] = cmd[field_name]
+            else:
+                report[cmd_name][Color.WARNING][field_name] = f"not found, default value is '{COMMAND_DEFAULT[field_name]}'"
+
+        for field_name in cmd:
+            if field_name not in COMMAND_REQUIRED_FIELDS and field_name not in COMMAND_DEFAULT:
+                report[cmd_name][Color.WARNING][field_name] = 'unknown field, ignored'
+
     # Check global summary_schedule parameter
-    global_report = {
-        Color.ERROR: {},
-        Color.WARNING: {},
-        Color.SUCCESS: {},
-    }
+    global_report = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
 
     if 'summary_schedule' not in config:
         global_report[Color.WARNING]['summary_schedule'] = 'not found, summary reports will not be sent'
     else:
         summary_schedule = config['summary_schedule']
+
         if not is_valid_cron(summary_schedule):
             global_report[Color.ERROR]['summary_schedule'] = f"invalid cron syntax: '{summary_schedule}'"
         else:
@@ -352,6 +424,7 @@ def print_check_config_report(report, global_report=None):
     # Print site-specific configuration
     for site_name, fields in report.items():
         color_text(f"\n=== {site_name} ===", Color.TITLE)
+
         for color, field_info in fields.items():
             for field_name, message in field_info.items():
                 color_text(f"  {field_name}: {message}", color)
@@ -499,13 +572,30 @@ def main():
         release_singleton_lock()
 
 
+def _get_check_config(name, config):
+    """Look up a check config by name — first in sites, then in commands."""
+    sites = config.get('sites', {})
+
+    if name in sites:
+        return sites[name], 'site'
+
+    commands = config.get('commands', {})
+
+    if name in commands:
+        return commands[name], 'command'
+
+    return None, None
+
+
 def process_cache(cache, config, messages):
-    for site_name, cache_info in cache.items():
-        if site_name not in config['sites']:
+    for name, cache_info in cache.items():
+        check_cfg, check_type = _get_check_config(name, config)
+
+        if check_cfg is None:
             continue
 
-        site = config['sites'][site_name]
-        notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
+        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
 
         failed_attempts = cache_info.get('failed_attempts', 0)
         notified_down = cache_info.get('notified_down', None)
@@ -514,20 +604,30 @@ def process_cache(cache, config, messages):
 
         # Send initial DOWN alert once
         if failed_attempts >= notify_after_attempt and not notified_down and last_error is not None:
-            tg_error_msg = generate_tg_error_msg(
-                messages,
-                last_error['msg'],
-                site_name=last_error['site_name'],
-                url=last_error['url'],
-                follow_redirects=last_error['follow_redirects'],
-                method=last_error['method'],
-                timeout=last_error['timeout'],
-                post_data=last_error['post_data'],
-                headers=last_error['headers'],
-                count=failed_attempts,
-            )
-            for chat_id in get_uniq_chat_ids(site['tg_chats_to_notify']):
-                telegram_helper.send_message(config['telegram_bot_token'], chat_id, tg_error_msg)
+            if check_type == 'site':
+                tg_msg = generate_tg_error_msg(
+                    messages,
+                    last_error['msg'],
+                    site_name=last_error['site_name'],
+                    url=last_error['url'],
+                    follow_redirects=last_error['follow_redirects'],
+                    method=last_error['method'],
+                    timeout=last_error['timeout'],
+                    post_data=last_error['post_data'],
+                    headers=last_error['headers'],
+                    count=failed_attempts,
+                )
+            else:
+                tg_msg = generate_tg_command_error_msg(
+                    messages,
+                    last_error['msg'],
+                    name=name,
+                    command=last_error.get('command', ''),
+                    count=failed_attempts,
+                )
+
+            for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
+                telegram_helper.send_message(config['telegram_bot_token'], chat_id, tg_msg)
 
             cache_info['notified_down'] = int(time.time())
             cache_info['notified_restore'] = None
@@ -536,11 +636,12 @@ def process_cache(cache, config, messages):
         elif last_error is None and notified_down and not notified_restore:
             msg = generate_back_online_msg(
                 messages=messages,
-                site_name=site_name,
+                site_name=name,
                 failed_attempts=cache_info.get('failed_attempts', 0),
                 down_timestamp=notified_down,
             )
-            for chat_id in get_uniq_chat_ids(site['tg_chats_to_notify']):
+
+            for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
                 telegram_helper.send_message(config['telegram_bot_token'], chat_id, msg)
 
             cache_info['notified_restore'] = int(time.time())
@@ -577,8 +678,23 @@ def process_site(site, site_name: str, cache: dict):
         headers=headers
     )
 
-    if site_name not in cache:
-        cache[site_name] = {
+    error_details = {
+        'msg': error_message,
+        'site_name': site_name,
+        'url': site['url'],
+        'follow_redirects': follow_redirects,
+        'method': method.value,
+        'timeout': timeout,
+        'post_data': post_data,
+        'headers': headers,
+    } if error_message else None
+
+    _update_cache(site_name, cache, error_message, error_details)
+
+
+def _update_cache(name: str, cache: dict, error_message: str | None, error_details: dict | None):
+    if name not in cache:
+        cache[name] = {
             'last_checked_at': int(time.time()),
             'last_error': '',
             'notified_down': None,
@@ -586,110 +702,85 @@ def process_site(site, site_name: str, cache: dict):
             'failed_attempts': 0,
         }
     else:
-        cache[site_name]['last_checked_at'] = int(time.time())
+        cache[name]['last_checked_at'] = int(time.time())
 
     if error_message:
-        if cache[site_name]['failed_attempts'] == 0:
-            cache[site_name]['failed_attempts'] = 1
-            cache[site_name]['notified_down'] = None
-            cache[site_name]['notified_restore'] = None
+        if cache[name]['failed_attempts'] == 0:
+            cache[name]['failed_attempts'] = 1
+            cache[name]['notified_down'] = None
+            cache[name]['notified_restore'] = None
         else:
-            cache[site_name]['failed_attempts'] += 1
+            cache[name]['failed_attempts'] += 1
 
-        cache[site_name]['last_error'] = {
-            'msg': error_message,
-            'site_name': site_name,
-            'url': site['url'],
-            'follow_redirects': follow_redirects,
-            'method': method.value,
-            'timeout': timeout,
-            'post_data': post_data,
-            'headers': headers
-        }
-
+        cache[name]['last_error'] = error_details
         color_text(error_message, Color.ERROR)
     else:
-        cache[site_name]['last_error'] = None
-        color_text(f"{site_name} completed successfully\n", Color.SUCCESS)
+        cache[name]['last_error'] = None
+        color_text(f"{name} completed successfully\n", Color.SUCCESS)
+
+
+def process_command(cmd_config, cmd_name: str, cache: dict):
+    timeout = cmd_config.get('timeout', COMMAND_DEFAULT['timeout'])
+    search = cmd_config.get('search_string', COMMAND_DEFAULT['search_string'])
+    absent = cmd_config.get('absent_string', COMMAND_DEFAULT['absent_string'])
+    min_value = cmd_config.get('min_value', COMMAND_DEFAULT['min_value'])
+
+    color_text(f"Running command: {cmd_name}", Color.QUOTATION)
+    error_message = perform_command(
+        command=cmd_config['command'],
+        timeout=timeout,
+        search=search,
+        absent=absent,
+        min_value=min_value,
+    )
+
+    error_details = {'msg': error_message, 'command': cmd_config['command']} if error_message else None
+    _update_cache(cmd_name, cache, error_message, error_details)
+
+
+def _should_run_check(name: str, schedule: str, cache: dict, force: bool) -> str | None:
+    """Return run reason ('force'/'schedule'/'down') or None to skip."""
+    if force:
+        return "force"
+
+    cache_entry = cache.get(name, {})
+    last_error = cache_entry.get('last_error')
+    has_error = last_error not in (None, "", {})
+
+    run_by_schedule = False
+    try:
+        run_by_schedule = should_run(schedule)
+    except (CroniterBadCronError, CroniterBadDateError):
+        pass
+
+    if has_error:
+        return "down"
+    elif run_by_schedule:
+        return "schedule"
+
+    return None
 
 
 def process_each_site(args, config, cache: dict, force=False) -> int:
-    """
-    Process all sites according to their schedules AND current error state.
-
-    Behavior:
-      - If force=True: check every site unconditionally.
-      - Else:
-          * If schedule matches now (should_run == True) -> check.
-          * If the site currently has last_error in cache -> check
-            on every run, regardless of schedule (DOWN/UNSTABLE retry).
-          * Otherwise -> skip.
-
-    Returns:
-        int: number of sites that were actually processed.
-    """
-    sites = config.get('sites', {})
-
-    if args.debug:
-        color_text(
-            f"[DEBUG] process_each_site(): total sites in config={len(sites)}, force={force}",
-            Color.QUOTATION,
-        )
-
+    """Process all sites and commands according to schedules and error state."""
     processed_count = 0
     skipped_count = 0
 
-    for site_name, site in sites.items():
+    for site_name, site in config.get('sites', {}).items():
         schedule = site.get('schedule', DEFAULT['schedule'])
-        cache_entry = cache.get(site_name, {})
-
-        last_error = cache_entry.get('last_error')
-        has_error = last_error not in (None, "", {})  # treat any non-empty last_error as a problem
-
-        run_reason = None  # "force" | "schedule" | "down"
-
-        if force:
-            run_reason = "force"
-        else:
-            # Evaluate schedule
-            run_by_schedule = False
-            try:
-                run_by_schedule = should_run(schedule)
-            except Exception as e:
-                if args.debug:
-                    color_text(
-                        f"[DEBUG] process_each_site(): ERROR evaluating schedule for '{site_name}' "
-                        f"(schedule='{schedule}'): {e!r}",
-                        Color.ERROR,
-                    )
-
-            # New behavior:
-            # - If the site currently has an error -> we want to retry it every run.
-            # - Otherwise fall back to schedule.
-            if has_error:
-                run_reason = "down"
-            elif run_by_schedule:
-                run_reason = "schedule"
-
-        if run_reason is not None:
-            if args.debug:
-                color_text(
-                    f"[DEBUG] process_each_site(): running '{site_name}' "
-                    f"(reason={run_reason}, schedule='{schedule}', has_error={has_error})",
-                    Color.QUOTATION,
-                )
-
+        if _should_run_check(site_name, schedule, cache, force):
             process_site(site, site_name, cache)
             processed_count += 1
         else:
             skipped_count += 1
 
-            if args.debug:
-                color_text(
-                    f"[DEBUG] process_each_site(): skipping '{site_name}' "
-                    f"(schedule='{schedule}', has_error={has_error})",
-                    Color.QUOTATION,
-                )
+    for cmd_name, cmd_config in config.get('commands', {}).items():
+        schedule = cmd_config.get('schedule', COMMAND_DEFAULT['schedule'])
+        if _should_run_check(cmd_name, schedule, cache, force):
+            process_command(cmd_config, cmd_name, cache)
+            processed_count += 1
+        else:
+            skipped_count += 1
 
     if args.debug:
         color_text(
@@ -704,24 +795,25 @@ def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) ->
     """Generate summary message with current services status"""
     services_down = []
 
-    for site_name, cache_info in cache.items():
-        if site_name not in config['sites']:
+    for name, cache_info in cache.items():
+        check_cfg, check_type = _get_check_config(name, config)
+
+        if check_cfg is None:
             continue
 
-        site = config['sites'][site_name]
-        notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
+        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
         failed_attempts = cache_info.get('failed_attempts', 0)
 
-        # Only include services that are actually down (failed attempts >= notify threshold)
         if failed_attempts >= notify_after_attempt and cache_info.get('last_error'):
             last_error = telegram_helper.escape_special_chars(cache_info['last_error']['msg'])
             notified_down_time = cache_info.get('notified_down')
-            site_name_escaped = telegram_helper.escape_special_chars(site_name)
+            name_escaped = telegram_helper.escape_special_chars(name)
 
             if notified_down_time:
                 minutes_down = round((int(time.time()) - notified_down_time) / 60)
                 services_down.append(
-                    f"🔴 _{site_name_escaped}_\n"
+                    f"🔴 _{name_escaped}_\n"
                     f"   Error: {last_error}\n"
                     f"   Down for: *{minutes_down}* minutes \\({failed_attempts} failed checks\\)"
                 )
@@ -771,12 +863,15 @@ def send_summary_if_due(config, cache: dict, messages):
 
     # Check if there are any services currently down
     has_services_down = False
-    for site_name, cache_info in cache.items():
-        if site_name not in config['sites']:
+
+    for name, cache_info in cache.items():
+        check_cfg, check_type = _get_check_config(name, config)
+
+        if check_cfg is None:
             continue
 
-        site = config['sites'][site_name]
-        notify_after_attempt = site.get('notify_after_attempt', DEFAULT['notify_after_attempt'])
+        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
         failed_attempts = cache_info.get('failed_attempts', 0)
 
         if failed_attempts >= notify_after_attempt and cache_info.get('last_error'):
@@ -786,13 +881,12 @@ def send_summary_if_due(config, cache: dict, messages):
     # Only send summary if there are services down
     if has_services_down:
         summary_msg = generate_summary_msg(messages, cache, config)
+        all_chat_ids = set()  # Collect all unique chat IDs from all sites and commands
 
-        # Collect all unique chat IDs from all sites
-        all_chat_ids = set()
-        for site in config['sites'].values():
-            all_chat_ids.update(get_uniq_chat_ids(site['tg_chats_to_notify']))
+        for check in list(config.get('sites', {}).values()) + list(config.get('commands', {}).values()):
+            if 'tg_chats_to_notify' in check:
+                all_chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
 
-        # Send summary to all chat IDs
         for chat_id in all_chat_ids:
             telegram_helper.send_message(config['telegram_bot_token'], chat_id, summary_msg)
 

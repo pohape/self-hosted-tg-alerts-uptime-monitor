@@ -32,18 +32,25 @@ def human_age(ts: Optional[int]) -> str:
     """Return a human-readable age like '3m ago' or '2h ago'."""
     if not ts:
         return "n/a"
+
     now = int(time.time())
     delta = max(0, now - ts)
 
     if delta < 60:
         return f"{delta}s ago"
+
     minutes = delta // 60
+
     if minutes < 60:
         return f"{minutes}m ago"
+
     hours = minutes // 60
+
     if hours < 24:
         return f"{hours}h ago"
+
     days = hours // 24
+
     return f"{days}d ago"
 
 
@@ -69,11 +76,7 @@ def determine_state(site_cfg: Dict[str, Any], cache_entry: Optional[Dict[str, An
 
     # Site considered UP when there is explicitly no last_error
     if last_error is None:
-        return {
-            "state": "UP",
-            "color": Color.SUCCESS,
-            "error_msg": None,
-        }
+        return {"state": "UP", "color": Color.SUCCESS, "error_msg": None}
 
     # For older / unexpected cache shapes
     if not isinstance(last_error, dict):
@@ -88,11 +91,7 @@ def determine_state(site_cfg: Dict[str, Any], cache_entry: Optional[Dict[str, An
         state = "UNSTABLE"
         color = Color.WARNING
 
-    return {
-        "state": state,
-        "color": color,
-        "error_msg": message,
-    }
+    return {"state": state, "color": color, "error_msg": message}
 
 
 def print_site_status(
@@ -111,13 +110,20 @@ def print_site_status(
     notified_down = cache_entry.get("notified_down") if cache_entry else None
     notified_restore = cache_entry.get("notified_restore") if cache_entry else None
 
-    url = site_cfg.get("url", "<no url>")
+    url = site_cfg.get("url")
+    command = site_cfg.get("command")
     schedule = site_cfg.get("schedule", "* * * * *")
     notify_after = site_cfg.get("notify_after_attempt", 1)
 
     color_text(f"{site_name}", Color.TITLE)
     color_text(f"  State: {state}", color)
-    print(f"  URL: {url}")
+
+    if url:
+        print(f"  URL: {url}")
+
+    if command:
+        print(f"  Command: {command}")
+
     print(f"  Schedule: {schedule}")
     print(f"  Notify after attempts: {notify_after}")
     print(f"  Last check at: {human_time(last_checked_at)} ({human_age(last_checked_at)})")
@@ -127,6 +133,7 @@ def print_site_status(
 
     if notified_down:
         print(f"  First DOWN notification at: {human_time(notified_down)} ({human_age(notified_down)})")
+
     if notified_restore:
         print(f"  RESTORE notification at: {human_time(notified_restore)} ({human_age(notified_restore)})")
 
@@ -141,29 +148,28 @@ def print_summary(status_counts: Dict[str, int], total_sites: int) -> None:
     """Print a short numeric summary of states."""
     color_text("=== SUMMARY ===", Color.TITLE)
     print(f"  Total sites: {total_sites}")
+
     for key in ("UP", "DOWN", "UNSTABLE", "UNKNOWN"):
         print(f"  {key:8}: {status_counts.get(key, 0)}")
+
     print()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Show current status of monitored sites based on the cache file."
-    )
-    parser.add_argument(
-        "--only-down",
-        action="store_true",
-        help="Show only sites that are DOWN or UNSTABLE.",
-    )
+    parser = argparse.ArgumentParser(description="Show current status of monitored sites based on the cache file.")
+    parser.add_argument("--only-down", action="store_true", help="Show only sites that are DOWN or UNSTABLE.")
 
     args = parser.parse_args()
 
     config = load_yaml_or_exit(CONFIG_PATH)
     cache = load_cache(CACHE_PATH)
     sites = config.get("sites", {})
+    commands = config.get("commands", {})
+    all_checks = {**sites, **commands}
 
-    if not sites:
-        color_text("No sites defined in config.yaml", Color.ERROR)
+    if not all_checks:
+        color_text("No sites or commands defined in config.yaml", Color.ERROR)
+
         return
 
     color_text("=== CURRENT MONITORING STATUS ===", Color.TITLE)
@@ -173,25 +179,28 @@ def main() -> None:
 
     status_counts: Dict[str, int] = {"UP": 0, "DOWN": 0, "UNSTABLE": 0, "UNKNOWN": 0}
 
-    for site_name, site_cfg in sites.items():
-        cache_entry = cache.get(site_name)
-        state_info = determine_state(site_cfg, cache_entry)
+    for name, cfg in all_checks.items():
+        cache_entry = cache.get(name)
+        state_info = determine_state(cfg, cache_entry)
         state = state_info["state"]
         status_counts[state] = status_counts.get(state, 0) + 1
 
         if args.only_down and state not in ("DOWN", "UNSTABLE"):
             continue
 
-        print_site_status(site_name, site_cfg, cache_entry, state_info)
+        print_site_status(name, cfg, cache_entry, state_info)
 
-    print_summary(status_counts, total_sites=len(sites))
+    print_summary(status_counts, total_sites=len(all_checks))
 
     # Orphan cache entries that no longer exist in config
-    orphaned = [name for name in cache.keys() if name not in sites]
+    orphaned = [name for name in cache.keys() if name not in all_checks]
+
     if orphaned:
         color_text("Orphaned cache entries (not present in config.yaml):", Color.WARNING)
+
         for name in sorted(orphaned):
             print(f"  - {name}")
+
         print()
 
 

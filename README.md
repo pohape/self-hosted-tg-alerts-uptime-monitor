@@ -34,6 +34,7 @@ Get instant **Telegram alerts** after N failures and a recovery notification whe
 - 💬 **Telegram Alerts** on errors & recovery
 - 📊 **Summary Reports**: one consolidated scheduled Telegram report of all services that are still down
 - ⚙️ **YAML-Based Config** — easy to read, edit, and version
+- 🖥️ **Shell Command Monitoring**: Run any command and validate its output
 - 🧪 **Debug/Test Modes** to simplify setup
 
 ---
@@ -291,6 +292,50 @@ sites:
 - **notify_after_attempt** (optional, default is 1): Number of consecutive failures required before a Telegram alert is sent. Helps to reduce false alarms from temporary glitches.
 
 If both **search_string** and **absent_string** are specified, both conditions must be satisfied for the site check to be considered successful.
+
+### Shell Command Monitoring
+
+In addition to HTTP checks, you can monitor the output of shell commands. Commands use the same alerting logic as sites (DOWN/RESTORE Telegram notifications, cron scheduling, retry on failure).
+
+Add a `commands` section to your **config.yaml**:
+
+```yaml
+commands:
+  # Check that a command outputs an expected string
+  backup_sync_check:
+    command: "/opt/backup/check_sync.sh --status"
+    search_string: "True"
+    schedule: '5 0 * * *'  # Daily at 00:05
+    timeout: 30
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # Alert if a numeric output drops below a threshold
+  disk_free_space:
+    command: "df /data --output=avail -BM | tail -1 | tr -d ' M'"
+    min_value: 1000  # alert if less than 1000 MB free
+    schedule: '0 * * * *'
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # Check that a forbidden string is absent
+  service_health:
+    command: "systemctl is-active my-service"
+    search_string: "active"
+    absent_string: "inactive"
+    schedule: '* * * * *'
+    tg_chats_to_notify:
+      - '1234567890'
+```
+
+Command configuration fields:
+
+- **command**: The shell command to execute (required)
+- **search_string** (optional): String that must be present in stdout
+- **absent_string** (optional): String that must NOT be present in stdout
+- **min_value** (optional): If set, stdout is parsed as an integer and an alert is triggered if the value is below this threshold
+- **timeout** (optional, default is 30): Command timeout in seconds
+- **schedule**, **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
 
 ### 🔄 Smart Recovery Notifications
 

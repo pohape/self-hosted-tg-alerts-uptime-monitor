@@ -85,3 +85,34 @@ sites:
     schedule: '0 * * * *'  # Every hour at 00 minutes
     tg_chats_to_notify:
       - '2345678999'  # infrastructure manager ID
+
+# Shell command monitoring
+# Runs shell commands and validates their output.
+# Same alerting logic as sites: DOWN/RESTORE Telegram notifications.
+commands:
+  # 1. Check that a command outputs an expected string
+  backup_sync_check:
+    command: "/opt/backup/check_sync.sh --status"
+    search_string: "True"
+    schedule: '5 0 * * *'  # Daily at 00:05
+    timeout: 30
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # 2. Check that a numeric output is above a minimum threshold
+  disk_free_space:
+    command: "df /data --output=avail -BM | tail -1 | tr -d ' M'"
+    min_value: 1000  # alert if less than 1000 MB free
+    schedule: '0 * * * *'  # Every hour
+    timeout: 10
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # 3. Check that a forbidden string is absent from output
+  service_health:
+    command: "systemctl is-active my-service"
+    search_string: "active"
+    absent_string: "inactive"
+    schedule: '* * * * *'  # Every minute
+    tg_chats_to_notify:
+      - '1234567890'
