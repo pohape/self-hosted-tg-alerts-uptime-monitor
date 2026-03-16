@@ -649,6 +649,12 @@ def process_cache(cache, config, messages):
 
 
 def process_site(site, site_name: str, cache: dict):
+    for field in REQUIRED_FIELDS:
+        if field not in site:
+            color_text(f"Skipping '{site_name}': missing required field '{field}'", Color.ERROR)
+
+            return
+
     method_raw = site.get('method', None)
 
     if method_raw:
@@ -720,6 +726,12 @@ def _update_cache(name: str, cache: dict, error_message: str | None, error_detai
 
 
 def process_command(cmd_config, cmd_name: str, cache: dict):
+    for field in COMMAND_REQUIRED_FIELDS:
+        if field not in cmd_config:
+            color_text(f"Skipping '{cmd_name}': missing required field '{field}'", Color.ERROR)
+
+            return
+
     timeout = cmd_config.get('timeout', COMMAND_DEFAULT['timeout'])
     search = cmd_config.get('search_string', COMMAND_DEFAULT['search_string'])
     absent = cmd_config.get('absent_string', COMMAND_DEFAULT['absent_string'])
