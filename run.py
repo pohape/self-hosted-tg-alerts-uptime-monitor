@@ -728,6 +728,8 @@ def _update_cache(name: str, cache: dict, error_message: str | None, error_detai
         color_text(error_message, Color.ERROR)
     else:
         cache[name]['last_error'] = None
+        if not cache[name].get('notified_down'):
+            cache[name]['failed_attempts'] = 0
         color_text(f"{name} completed successfully\n", Color.SUCCESS)
 
 
