@@ -6,9 +6,26 @@ import requests
 from console_helper import Color, color_text
 
 
+def get_proxies(config: dict):
+    """Return a dict for requests' ``proxies=`` kwarg or None.
+
+    Reads the optional top-level ``telegram_proxy`` from config.
+    Supports any scheme accepted by requests, for example:
+        - ``http://host:port``
+        - ``socks5://host:port``
+        - ``socks5h://host:port``  (resolves hostnames on the proxy side — useful for DPI bypass)
+
+    SOCKS schemes require ``requests[socks]`` (PySocks) to be installed.
+    """
+    proxy = config.get('telegram_proxy')
+    if not proxy:
+        return None
+    return {'http': proxy, 'https': proxy}
+
+
 def get_bot_link(config: dict) -> str:
     url = f"https://api.telegram.org/bot{config['telegram_bot_token']}/getMe"
-    response = requests.get(url).json()
+    response = requests.get(url, proxies=get_proxies(config)).json()
 
     if response.get("ok") and "result" in response:
         username = response["result"].get("username")
@@ -44,7 +61,7 @@ def id_bot(config: dict):
     last_update_id = None
 
     while True:
-        updates = get_updates(config['telegram_bot_token'], last_update_id)
+        updates = get_updates(config, last_update_id)
 
         if not updates['ok']:
             color_text('Telegram error: ' + str(updates), Color.ERROR)
@@ -54,7 +71,7 @@ def id_bot(config: dict):
                 message = update.get('message')
 
                 if message:
-                    handle_message(config['telegram_bot_token'], message)
+                    handle_message(config, message)
                     last_update_id = update['update_id'] + 1
         time.sleep(0.1)
 
@@ -70,7 +87,7 @@ def test_notifications(config, get_uniq_chat_ids):
     test_message = escape_special_chars('This is a test message from the monitoring script.')
 
     for chat_id in chat_ids:
-        send_message(config['telegram_bot_token'], chat_id, test_message)
+        send_message(config, chat_id, test_message)
 
 
 def escape_special_chars(text):
@@ -108,8 +125,8 @@ def escape_special_chars(text):
     return text
 
 
-def send_message(bot_token, chat_id, message):
-    url = 'https://api.telegram.org/bot{}/sendMessage'.format(bot_token)
+def send_message(config, chat_id, message):
+    url = 'https://api.telegram.org/bot{}/sendMessage'.format(config['telegram_bot_token'])
 
     data = {
         "chat_id": chat_id,
@@ -120,7 +137,8 @@ def send_message(bot_token, chat_id, message):
     response = requests.post(
         url,
         headers={"Content-Type": "application/json"},
-        data=json.dumps(data)
+        data=json.dumps(data),
+        proxies=get_proxies(config),
     )
 
     response_parsed = response.json()
@@ -135,14 +153,18 @@ def send_message(bot_token, chat_id, message):
         return response_parsed['description']
 
 
-def get_updates(telegram_bot_token, offset=None):
+def get_updates(config, offset=None):
     params = {'timeout': 100, 'offset': offset}
-    response = requests.get(f'https://api.telegram.org/bot{telegram_bot_token}/getUpdates', params=params)
+    response = requests.get(
+        f"https://api.telegram.org/bot{config['telegram_bot_token']}/getUpdates",
+        params=params,
+        proxies=get_proxies(config),
+    )
 
     return response.json()
 
 
-def handle_message(bot_token, message):
+def handle_message(config, message):
     chat_id = message['chat']['id']
 
     if 'forward_from' in message:
@@ -158,4 +180,4 @@ def handle_message(bot_token, message):
         user_id = message['from']['id']
         response_text = f'Your user ID is `{user_id}`'
 
-    send_message(bot_token, chat_id, response_text)
+    send_message(config, chat_id, response_text)

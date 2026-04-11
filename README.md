@@ -187,6 +187,7 @@ The configuration is done through the **config.yaml** file. Below is an example 
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
 +summary_schedule: '0 17 * * *'  # (optional) daily summary at 17:00 if at least one site is down
++telegram_proxy: 'socks5h://127.0.0.1:1080'  # (optional) proxy for Telegram API calls only
 
 sites:
   # 1. GET request to the main page where we look for "<body>"
@@ -352,6 +353,67 @@ Command configuration fields:
 - 🎯 **Smart Filtering**: Summaries are only sent when there are actually failing services
 - 📋 **Comprehensive Overview**: Shows all services currently down with error details and duration
 - 📢 **Broadcast Delivery**: Sent to all unique chat IDs from your monitored sites
+
+### 🛰️ Telegram Proxy (optional)
+
+If the host cannot reach `api.telegram.org` directly (e.g. your ISP blocks it), you can route **only Telegram API calls** through a proxy. Site/command checks are **not** affected.
+
+> 🇷🇺 **Важно для пользователей из России:** доступ к `api.telegram.org` заблокирован РКН. Без `telegram_proxy` мониторинг не сможет отправлять уведомления. Рекомендуется поднять SSH-туннель до любого зарубежного VPS и использовать его как локальный SOCKS5-прокси (см. пример ниже).
+
+Add an optional top-level `telegram_proxy` to `config.yaml`:
+
+```yaml
+telegram_proxy: 'socks5h://127.0.0.1:1080'
+```
+
+Supported schemes:
+
+| Scheme | When to use |
+|---|---|
+| `http://host:port` | Plain HTTP proxy |
+| `socks5://host:port` | SOCKS5 proxy, hostname resolved locally |
+| `socks5h://host:port` | SOCKS5 proxy, hostname resolved on the **proxy side** — recommended when DNS for `api.telegram.org` is also filtered locally |
+
+SOCKS support requires PySocks, already included via `requests[socks]` in `requirements.txt`.
+
+**Example: set up a local SOCKS5 proxy via SSH tunnel**
+
+On any box you control (including the monitoring host itself), start an SSH tunnel to a server outside the blocked region:
+
+```bash
+ssh -D 0.0.0.0:1080 -N user@your-server.example.com
+```
+
+For production use it under a systemd service with `autossh` so it reconnects automatically:
+
+```ini
+[Unit]
+Description=AutoSSH SOCKS5 tunnel for Telegram API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=your-user
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -D 0.0.0.0:1080 user@your-server.example.com
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then in `config.yaml`:
+
+```yaml
+telegram_proxy: 'socks5h://127.0.0.1:1080'
+```
+
+Done — `api.telegram.org` calls now exit from your foreign server, while site/command checks still run directly from the monitoring host.
 
 ### 💬 Contributing
 

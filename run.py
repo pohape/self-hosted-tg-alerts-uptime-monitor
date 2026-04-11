@@ -626,11 +626,14 @@ def process_cache(cache, config, messages):
                     count=failed_attempts,
                 )
 
+            all_sent = True
             for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
-                telegram_helper.send_message(config['telegram_bot_token'], chat_id, tg_msg)
+                if telegram_helper.send_message(config, chat_id, tg_msg) is not None:
+                    all_sent = False
 
-            cache_info['notified_down'] = int(time.time())
-            cache_info['notified_restore'] = None
+            if all_sent:
+                cache_info['notified_down'] = int(time.time())
+                cache_info['notified_restore'] = None
 
         # Send RESTORE alert once
         elif last_error is None and notified_down and not notified_restore:
@@ -641,11 +644,14 @@ def process_cache(cache, config, messages):
                 down_timestamp=notified_down,
             )
 
+            all_sent = True
             for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
-                telegram_helper.send_message(config['telegram_bot_token'], chat_id, msg)
+                if telegram_helper.send_message(config, chat_id, msg) is not None:
+                    all_sent = False
 
-            cache_info['notified_restore'] = int(time.time())
-            cache_info['failed_attempts'] = 0
+            if all_sent:
+                cache_info['notified_restore'] = int(time.time())
+                cache_info['failed_attempts'] = 0
 
 
 def process_site(site, site_name: str, cache: dict):
@@ -722,6 +728,8 @@ def _update_cache(name: str, cache: dict, error_message: str | None, error_detai
         color_text(error_message, Color.ERROR)
     else:
         cache[name]['last_error'] = None
+        if not cache[name].get('notified_down'):
+            cache[name]['failed_attempts'] = 0
         color_text(f"{name} completed successfully\n", Color.SUCCESS)
 
 
@@ -900,7 +908,7 @@ def send_summary_if_due(config, cache: dict, messages):
                 all_chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
 
         for chat_id in all_chat_ids:
-            telegram_helper.send_message(config['telegram_bot_token'], chat_id, summary_msg)
+            telegram_helper.send_message(config, chat_id, summary_msg)
 
         color_text("Summary report sent", Color.SUCCESS)
 

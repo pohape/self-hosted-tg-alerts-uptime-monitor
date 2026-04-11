@@ -1,6 +1,14 @@
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
 
+# Optional: proxy for Telegram API calls only (does NOT affect site/command checks).
+# Useful when the host cannot reach api.telegram.org directly (e.g. blocked by an ISP or firewall).
+# Supported schemes: http, https, socks5, socks5h.
+# Use socks5h:// to have hostnames resolved on the proxy side — recommended when
+# DNS for api.telegram.org is also filtered locally.
+# SOCKS support requires `requests[socks]` from requirements.txt.
+# telegram_proxy: 'socks5h://127.0.0.1:1080'
+
 sites:
   # 1. GET request to the main page where we look for "<body>"
   #    - No timeout specified (default is 5 seconds)
