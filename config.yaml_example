@@ -80,7 +80,19 @@ sites:
     schedule: '0 * * * *'  # Every hour at 00 minutes
     # No timeout specified (default is 5 seconds)
 
-  # 6. Monitor ChatGPT API balance availability (one check costs ~$0.000001275)
+  # 6. Check that an admin area requires HTTP Basic Auth
+  admin_login_challenge:
+    url: "https://admin.example.com/"
+    method: "HEAD"
+    status_code: 401
+    response_headers:
+      - name: "WWW-Authenticate"
+        contains: 'Basic realm="Admin"'
+    schedule: '*/5 * * * *'  # Every 5 minutes
+    tg_chats_to_notify:
+      - '2345678901'  # backend group ID
+
+  # 7. Monitor ChatGPT API balance availability (one check costs ~$0.000001275)
   chat_gpt_balance_check:
     url: "https://api.openai.com/v1/chat/completions"
     method: "POST"

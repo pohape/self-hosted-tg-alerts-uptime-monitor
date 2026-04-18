@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import requests
 from croniter import croniter, CroniterBadCronError, CroniterBadDateError
+from requests.structures import CaseInsensitiveDict
 
 import telegram_helper
 from console_helper import Color, color_text
@@ -30,6 +31,7 @@ DEFAULT = {
     'post_data': None,
     'search_string': '',
     'absent_string': '',
+    'response_headers': [],
     'headers': {},
     'follow_redirects': False,
     'notify_after_attempt': 1,
@@ -193,9 +195,15 @@ def perform_request(url: str,
                     status_codes: list[int],
                     search: str,
                     absent: str,
+                    response_header_rules: list[dict],
                     timeout: int,
-                    post_data: str,
+                    post_data: str | None,
                     headers: dict):
+    response_header_error = validate_response_header_rules(response_header_rules)
+
+    if response_header_error:
+        return f"Invalid response_headers config: {response_header_error}"
+
     if url.startswith('https://'):
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
@@ -226,7 +234,14 @@ def perform_request(url: str,
 
         if res.status_code not in status_codes:
             return f"Expected status code {status_codes}, but got '{res.status_code}'"
-        elif method in {RequestMethod.GET, RequestMethod.POST}:  # Only for GET/POST: validate content
+
+        if response_header_rules:
+            response_header_error = validate_response_headers(res.headers, response_header_rules)
+
+            if response_header_error:
+                return response_header_error
+
+        if method in {RequestMethod.GET, RequestMethod.POST}:  # Only for GET/POST: validate content
             if search and search not in res.text:
                 return f"The expected string '{search}' was not found in the response."
             elif absent and absent in res.text:
@@ -246,6 +261,7 @@ def perform_command(command: str, timeout: int, search: str, absent: str, min_va
 
     if result.returncode != 0:
         stderr = result.stderr.strip()[:200]
+
         return f"Command exited with code {result.returncode}: {stderr}"
 
     output = result.stdout.strip()
@@ -262,6 +278,72 @@ def perform_command(command: str, timeout: int, search: str, absent: str, min_va
                 return f"Value {val} is below minimum {min_value}"
         except ValueError:
             return f"Expected numeric output, got: '{output}'"
+
+    return None
+
+
+def validate_response_header_rules(rules) -> str | None:
+    if not isinstance(rules, list):
+        return "must be a list of header rules"
+
+    for index, rule in enumerate(rules, start=1):
+        if not isinstance(rule, dict):
+            return f"rule #{index} must be a dictionary"
+
+        unknown_keys = set(rule.keys()) - {'name', 'contains', 'absent'}
+
+        if unknown_keys:
+            unknown_keys_formatted = ', '.join(sorted(unknown_keys))
+            return f"rule #{index} has unknown fields: {unknown_keys_formatted}"
+
+        name = rule.get('name')
+
+        if not isinstance(name, str) or not name.strip():
+            return f"rule #{index} must have a non-empty string 'name'"
+
+        present_matchers = [matcher for matcher in ('contains', 'absent') if matcher in rule]
+
+        if len(present_matchers) != 1:
+            return f"rule #{index} must define exactly one of: contains, absent"
+
+        matcher_name = present_matchers[0]
+        matcher_value = rule[matcher_name]
+
+        if not isinstance(matcher_value, str) or matcher_value == '':
+            return f"rule #{index} field '{matcher_name}' must be a non-empty string"
+
+    return None
+
+
+def format_response_header_rules(rules: list[dict]) -> str:
+    formatted_rules = []
+
+    for rule in rules:
+        matcher_name = 'contains' if 'contains' in rule else 'absent'
+        formatted_rules.append(f"{rule['name']} {matcher_name} '{rule[matcher_name]}'")
+
+    return '; '.join(formatted_rules)
+
+
+def validate_response_headers(response_headers, rules: list[dict]) -> str | None:
+    headers = CaseInsensitiveDict(response_headers)
+
+    for rule in rules:
+        header_name = rule['name']
+        header_value = headers.get(header_name)
+
+        if 'contains' in rule:
+            expected = rule['contains']
+
+            if header_value is None:
+                return f"Expected header '{header_name}' containing '{expected}', but header was missing."
+            elif expected not in header_value:
+                return f"Expected header '{header_name}' to contain '{expected}', but got '{header_value}'."
+        else:
+            forbidden = rule['absent']
+
+            if header_value is not None and forbidden in header_value:
+                return f"Forbidden '{forbidden}' found in header '{header_name}': '{header_value}'."
 
     return None
 
@@ -347,6 +429,17 @@ def check_config(config):
                         report[site_name][Color.ERROR][field_name] = 'must be a dictionary of header key-value pairs'
                 else:
                     report[site_name][Color.WARNING][field_name] = 'not found, default value is empty headers'
+            elif field_name == 'response_headers':
+                if field_name in site:
+                    validation_error = validate_response_header_rules(site[field_name])
+
+                    if validation_error is None:
+                        report[site_name][Color.SUCCESS][field_name] = format_response_header_rules(site[field_name])
+                    else:
+                        report[site_name][Color.ERROR][field_name] = validation_error
+                else:
+                    report[site_name][Color.WARNING][
+                        field_name] = 'not found, default value is no response header checks'
             elif field_name in site:
                 if field_name == 'schedule' and not is_valid_cron(site['schedule']):
                     report[site_name][Color.ERROR][field_name] = f"invalid cron syntax: '{site['schedule']}'"
@@ -485,10 +578,7 @@ def main():
         config = load_yaml_or_exit(CONFIG_PATH)
 
         if args.debug:
-            color_text("[DEBUG] Config loaded successfully", Color.SUCCESS)
-
-        if args.debug:
-            color_text(f"[DEBUG] Loading messages from {MESSAGES_PATH}", Color.QUOTATION)
+            color_text("[DEBUG] Config loaded successfully, loading messages from {MESSAGES_PATH}", Color.QUOTATION)
 
         messages = load_yaml_or_exit(MESSAGES_PATH)
 
@@ -627,6 +717,7 @@ def process_cache(cache, config, messages):
                 )
 
             all_sent = True
+
             for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
                 if telegram_helper.send_message(config, chat_id, tg_msg) is not None:
                     all_sent = False
@@ -674,6 +765,7 @@ def process_site(site, site_name: str, cache: dict):
     timeout: int = cast(int, site.get('timeout', DEFAULT['timeout']))
     post_data: str | None = cast(str, site.get('post_data', DEFAULT['post_data']))
     headers = site.get('headers', DEFAULT['headers'])
+    response_header_rules = site.get('response_headers', DEFAULT['response_headers'])
 
     raw_status_code = site.get('status_code', DEFAULT['status_code'])
     status_codes = raw_status_code if isinstance(raw_status_code, list) else [raw_status_code]
@@ -685,6 +777,7 @@ def process_site(site, site_name: str, cache: dict):
         status_codes=status_codes,
         search=site.get('search_string', DEFAULT['search_string']),
         absent=site.get('absent_string', DEFAULT['absent_string']),
+        response_header_rules=response_header_rules,
         timeout=timeout,
         post_data=post_data,
         headers=headers
@@ -788,6 +881,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
 
     for site_name, site in config.get('sites', {}).items():
         schedule = site.get('schedule', DEFAULT['schedule'])
+
         if _should_run_check(site_name, schedule, cache, force):
             process_site(site, site_name, cache)
             processed_count += 1
@@ -796,6 +890,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
 
     for cmd_name, cmd_config in config.get('commands', {}).items():
         schedule = cmd_config.get('schedule', COMMAND_DEFAULT['schedule'])
+
         if _should_run_check(cmd_name, schedule, cache, force):
             process_command(cmd_config, cmd_name, cache)
             processed_count += 1
@@ -838,10 +933,10 @@ def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) ->
                     f"   Down for: *{minutes_down}* minutes \\({failed_attempts} failed checks\\)"
                 )
 
-    if not services_down:
-        services_down_text = "🟢 *All services are operational*"
-    else:
+    if services_down:
         services_down_text = "\n\n".join(services_down)
+    else:
+        services_down_text = "🟢 *All services are operational*"
 
     timestamp = telegram_helper.escape_special_chars(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -870,6 +965,7 @@ def should_send_summary(config: dict) -> bool:
 
     try:
         cron = croniter(schedule, base_time)
+
         return cron.get_prev(datetime) == base_time or cron.get_next(datetime) == base_time
     except (CroniterBadCronError, CroniterBadDateError):
         return False
@@ -896,6 +992,7 @@ def send_summary_if_due(config, cache: dict, messages):
 
         if failed_attempts >= notify_after_attempt and cache_info.get('last_error'):
             has_services_down = True
+
             break
 
     # Only send summary if there are services down

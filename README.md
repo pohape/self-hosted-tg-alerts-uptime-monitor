@@ -29,6 +29,9 @@ Get instant **Telegram alerts** after N failures and a recovery notification whe
 - 🧠 **Content Validation**:
      * ✅ search_string: Verify a specific string is present in the response
      * ❌ absent_string: Verify a specific string is absent in the response
+- 🧾 **Response Header Validation**:
+     * ✅ response_headers contains: Verify a response header contains a specific substring
+     * ❌ response_headers absent: Verify a response header does not contain a specific substring
 - 🛠️ **Custom Headers** & POST data
 - 🕒 **Flexible Cron Scheduling** per site
 - 💬 **Telegram Alerts** on errors & recovery
@@ -261,7 +264,19 @@ sites:
     schedule: '0 * * * *'  # Every hour at 00 minutes
     # No timeout specified (default is 5 seconds)
 
-  # 6. Monitor ChatGPT API balance availability (one check costs ~$0.000001275)
+  # 6. Check that an admin area requires HTTP Basic Auth
+  admin_login_challenge:
+    url: "https://admin.example.com/"
+    method: "HEAD"
+    status_code: 401
+    response_headers:
+      - name: "WWW-Authenticate"
+        contains: 'Basic realm="Admin"'
+    schedule: '*/5 * * * *'  # Every 5 minutes
+    tg_chats_to_notify:
+      - '2345678901'  # backend group ID
+
+  # 7. Monitor ChatGPT API balance availability (one check costs ~$0.000001275)
   chat_gpt_balance_check:
     url: "https://api.openai.com/v1/chat/completions"
     method: "POST"
@@ -283,6 +298,7 @@ sites:
 - **follow_redirects**: (optional, default is False): Whether to follow HTTP redirects during the request.
 - **method** (optional, default is GET): The HTTP method to use (GET, POST, HEAD).
 - **headers** (optional): A dictionary of HTTP headers to include in the request.
+- **response_headers** (optional): A list of response header rules. Each rule must contain `name` and exactly one of `contains` or `absent`.
 - **post_data** (optional): Only for the POST method.
 - **status_code** (optional, default is 200): An expected HTTP status code.
 - **search_string** (optional): String that must be present in the HTTP response body for the check to pass.
@@ -293,6 +309,22 @@ sites:
 - **notify_after_attempt** (optional, default is 1): Number of consecutive failures required before a Telegram alert is sent. Helps to reduce false alarms from temporary glitches.
 
 If both **search_string** and **absent_string** are specified, both conditions must be satisfied for the site check to be considered successful.
+
+Response header rule format:
+
+```yaml
+response_headers:
+  - name: "WWW-Authenticate"
+    contains: 'Basic realm="Admin"'
+  - name: "Server"
+    absent: "nginx/1.18.0"
+```
+
+- **name**: Response header name. Matching is case-insensitive.
+- **contains**: Passes only if the response header exists and contains the given substring.
+- **absent**: Passes if the response header is missing, or if the given substring is not present in its value.
+
+Header checks work for all HTTP methods, including `HEAD`.
 
 ### Shell Command Monitoring
 
