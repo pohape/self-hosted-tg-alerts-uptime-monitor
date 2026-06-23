@@ -293,6 +293,7 @@ sites:
 
 - **telegram_bot_token**: Your Telegram bot token obtained from @BotFather.
 - **summary_schedule** (optional): Cron expression that defines when a consolidated downtime summary should be sent. A message is generated only if at least one monitored service is still failing at that moment.
+- **telegram_api_host** (optional, default is `api.telegram.org`): Host of the Telegram Bot API. Point it to your own mirror (e.g. `api.example.com`) to bypass blocking without a tunnel. See [Bypassing Telegram Blocking](#-bypassing-telegram-blocking). Provide a bare hostname — scheme/trailing slash are ignored and HTTPS is always used.
 - **sites**: A list of sites to monitor.
 - **url**: The URL of the site to monitor.
 - **follow_redirects**: (optional, default is False): Whether to follow HTTP redirects during the request.
@@ -386,9 +387,20 @@ Command configuration fields:
 - 📋 **Comprehensive Overview**: Shows all services currently down with error details and duration
 - 📢 **Broadcast Delivery**: Sent to all unique chat IDs from your monitored sites
 
+### 🚧 Bypassing Telegram Blocking
+
+If the host cannot reach `api.telegram.org` directly (e.g. your ISP or country blocks it), there are **two independent ways** to deliver alerts anyway — pick whichever fits your setup:
+
+1. **`telegram_proxy`** — route only Telegram API calls through a SOCKS5/HTTP proxy (typically an SSH tunnel to a foreign VPS). Nothing else changes; site/command checks stay direct. See [Telegram Proxy](#️-telegram-proxy-optional).
+2. **`telegram_api_host`** — point the monitor at your own mirror of the Bot API instead of `api.telegram.org`. No tunnel or local proxy required. See [Telegram API mirror](#-telegram-api-mirror-via-reverse-proxy-optional).
+
+> 🇷🇺 **Важно для пользователей из России:** доступ к `api.telegram.org` заблокирован РКН — без одного из этих вариантов мониторинг не сможет отправлять уведомления. Проверки самих сайтов/команд при этом не затрагиваются.
+
+The mirror approach is often the simplest to operate: there is no tunnel to keep alive, and the connection from the monitoring host uses your own (unblocked) domain in the TLS SNI, so DPI that filters by the `api.telegram.org` SNI does not see it.
+
 ### 🛰️ Telegram Proxy (optional)
 
-If the host cannot reach `api.telegram.org` directly (e.g. your ISP blocks it), you can route **only Telegram API calls** through a proxy. Site/command checks are **not** affected.
+You can route **only Telegram API calls** through a proxy. Site/command checks are **not** affected.
 
 > 🇷🇺 **Важно для пользователей из России:** доступ к `api.telegram.org` заблокирован РКН. Без `telegram_proxy` мониторинг не сможет отправлять уведомления. Рекомендуется поднять SSH-туннель до любого зарубежного VPS и использовать его как локальный SOCKS5-прокси (см. пример ниже).
 
@@ -446,6 +458,41 @@ telegram_proxy: 'socks5h://127.0.0.1:1080'
 ```
 
 Done — `api.telegram.org` calls now exit from your foreign server, while site/command checks still run directly from the monitoring host.
+
+### 🪞 Telegram API mirror via reverse proxy (optional)
+
+Instead of a tunnel, you can run a tiny **reverse proxy on your own foreign VPS** that transparently forwards Bot API requests to `api.telegram.org`, and point the monitor at it via `telegram_api_host`. Because the monitoring host now talks to *your* domain over HTTPS, the TLS SNI on the wire is your domain — not `api.telegram.org` — so SNI-based DPI lets it through, and there is no local proxy/tunnel to keep running.
+
+Pick a subdomain you control (here shown as `api.example.com`), give it an `A` record pointing to your VPS, and let the VPS web server obtain a valid certificate for it automatically. With [Caddy](https://caddyserver.com/) the whole proxy is a few lines:
+
+```caddy
+api.example.com {
+	# Optional but recommended: only allow your monitoring host(s).
+	@blocked not remote_ip <YOUR_MONITORING_HOST_IP>
+	route {
+		respond @blocked "Forbidden" 403
+		reverse_proxy https://api.telegram.org {
+			header_up Host api.telegram.org
+		}
+	}
+}
+```
+
+What happens:
+
+- Caddy gets a real Let's Encrypt certificate for `api.example.com` (issued from your VPS, outside the blocked region).
+- The monitor connects to `https://api.example.com/bot<token>/...`; Caddy re-issues the request to the genuine `api.telegram.org` (correct upstream SNI + `Host`), and the bot-token path / `/file/...` downloads pass through unchanged.
+- TLS terminates legitimately at your VPS, so the monitor needs no certificate tweaks.
+
+> ⚠️ Without the `remote_ip` allowlist the endpoint is an **open relay** to Telegram — anyone who learns the hostname could route their own bot traffic through your server. Restrict it to your monitoring host's IP (or add basic auth).
+
+Then in `config.yaml`:
+
+```yaml
+telegram_api_host: 'api.example.com'
+```
+
+Leave `telegram_proxy` unset when using this approach.
 
 ### 💬 Contributing
 

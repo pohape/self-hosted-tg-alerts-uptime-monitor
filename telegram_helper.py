@@ -23,8 +23,24 @@ def get_proxies(config: dict):
     return {'http': proxy, 'https': proxy}
 
 
+def get_api_base(config: dict) -> str:
+    """Return the base URL for the Telegram Bot API, without a trailing slash.
+
+    The host defaults to the official ``api.telegram.org``. Set the optional
+    top-level ``telegram_api_host`` to a host that mirrors the Bot API (your
+    own reverse proxy, e.g. ``api.example.com``) to route calls through it —
+    useful where ``api.telegram.org`` is blocked by SNI-based DPI and an
+    SSH/SOCKS tunnel is undesirable. Provide a bare hostname; any scheme or
+    trailing slash is stripped, and HTTPS is always used.
+    """
+    host = config.get('telegram_api_host', 'api.telegram.org').strip()
+    host = host.replace('https://', '').replace('http://', '').strip('/')
+
+    return f"https://{host}"
+
+
 def get_bot_link(config: dict) -> str:
-    url = f"https://api.telegram.org/bot{config['telegram_bot_token']}/getMe"
+    url = f"{get_api_base(config)}/bot{config['telegram_bot_token']}/getMe"
     response = requests.get(url, proxies=get_proxies(config)).json()
 
     if response.get("ok") and "result" in response:
@@ -126,7 +142,7 @@ def escape_special_chars(text):
 
 
 def send_message(config, chat_id, message):
-    url = 'https://api.telegram.org/bot{}/sendMessage'.format(config['telegram_bot_token'])
+    url = '{}/bot{}/sendMessage'.format(get_api_base(config), config['telegram_bot_token'])
 
     data = {
         "chat_id": chat_id,
@@ -156,7 +172,7 @@ def send_message(config, chat_id, message):
 def get_updates(config, offset=None):
     params = {'timeout': 100, 'offset': offset}
     response = requests.get(
-        f"https://api.telegram.org/bot{config['telegram_bot_token']}/getUpdates",
+        f"{get_api_base(config)}/bot{config['telegram_bot_token']}/getUpdates",
         params=params,
         proxies=get_proxies(config),
     )
