@@ -10,21 +10,26 @@ and prints a human-readable status to the terminal.
 """
 import argparse
 import time
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import Any, Dict, Optional
 
 from console_helper import Color, color_text
 from filesystem_helper import load_yaml_or_exit, load_cache
-from run import CACHE_PATH, CONFIG_PATH
+from run import CACHE_PATH, CONFIG_PATH, resolve_timezone
 
 
-def human_time(ts: Optional[int]) -> str:
-    """Return a human-readable timestamp or a placeholder."""
+def human_time(ts: Optional[int], tz: Optional[tzinfo] = None) -> str:
+    """Return a human-readable timestamp or a placeholder.
+
+    Timestamps are stored as UTC epoch seconds; tz only affects how they are rendered.
+    """
     if not ts:
         return "never"
     try:
-        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    except (OSError, ValueError):
+        moment = datetime.fromtimestamp(ts, tz) if tz is not None else datetime.fromtimestamp(ts).astimezone()
+
+        return moment.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (OSError, OverflowError, ValueError):
         return f"invalid ({ts})"
 
 
@@ -99,6 +104,7 @@ def print_site_status(
         site_cfg: Dict[str, Any],
         cache_entry: Optional[Dict[str, Any]],
         state_info: Dict[str, Any],
+        tz: Optional[tzinfo] = None,
 ) -> None:
     """Print detailed status for a single site."""
     state = state_info["state"]
@@ -126,16 +132,16 @@ def print_site_status(
 
     print(f"  Schedule: {schedule}")
     print(f"  Notify after attempts: {notify_after}")
-    print(f"  Last check at: {human_time(last_checked_at)} ({human_age(last_checked_at)})")
+    print(f"  Last check at: {human_time(last_checked_at, tz)} ({human_age(last_checked_at)})")
 
     if failed_attempts is not None:
         print(f"  Failed attempts: {failed_attempts}")
 
     if notified_down:
-        print(f"  First DOWN notification at: {human_time(notified_down)} ({human_age(notified_down)})")
+        print(f"  First DOWN notification at: {human_time(notified_down, tz)} ({human_age(notified_down)})")
 
     if notified_restore:
-        print(f"  RESTORE notification at: {human_time(notified_restore)} ({human_age(notified_restore)})")
+        print(f"  RESTORE notification at: {human_time(notified_restore, tz)} ({human_age(notified_restore)})")
 
     if error_msg:
         print("  Last error:")
@@ -162,6 +168,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_yaml_or_exit(CONFIG_PATH)
+    tz = resolve_timezone(config)
     cache = load_cache(CACHE_PATH)
     sites = config.get("sites", {})
     commands = config.get("commands", {})
@@ -188,7 +195,7 @@ def main() -> None:
         if args.only_down and state not in ("DOWN", "UNSTABLE"):
             continue
 
-        print_site_status(name, cfg, cache_entry, state_info)
+        print_site_status(name, cfg, cache_entry, state_info, tz)
 
     print_summary(status_counts, total_sites=len(all_checks))
 

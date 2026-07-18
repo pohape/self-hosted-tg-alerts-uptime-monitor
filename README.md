@@ -189,6 +189,7 @@ The configuration is done through the **config.yaml** file. Below is an example 
 ```yaml
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
++timezone: 'Europe/Moscow'  # (optional) schedules and displayed times use the machine timezone if not set
 +summary_schedule: '0 17 * * *'  # (optional) daily summary at 17:00 if at least one site is down
 +telegram_proxy: 'socks5h://127.0.0.1:1080'  # (optional) proxy for Telegram API calls only
 
@@ -292,6 +293,7 @@ sites:
 ```
 
 - **telegram_bot_token**: Your Telegram bot token obtained from @BotFather.
+- **timezone** (optional, default is the machine timezone): IANA timezone name (e.g. `Europe/Moscow`) used for all `schedule` / `summary_schedule` expressions and for the times shown in reports. You only need it when the server clock is in a different timezone than the one you write your schedules in. An unknown value stops the script with an error; run `python3 run.py --check-config` to see the valid ones.
 - **summary_schedule** (optional): Cron expression that defines when a consolidated downtime summary should be sent. A message is generated only if at least one monitored service is still failing at that moment.
 - **telegram_api_host** (optional, default is `api.telegram.org`): Host of the Telegram Bot API. Point it to your own mirror (e.g. `api.example.com`) to bypass blocking without a tunnel. See [Bypassing Telegram Blocking](#-bypassing-telegram-blocking). Provide a bare hostname — scheme/trailing slash are ignored and HTTPS is always used.
 - **sites**: A list of sites to monitor.

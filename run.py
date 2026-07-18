@@ -1,12 +1,14 @@
 import argparse
+import difflib
 import socket
 import ssl
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from enum import Enum
 from typing import cast
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import requests
 from croniter import croniter, CroniterBadCronError, CroniterBadDateError
@@ -358,8 +360,8 @@ def generate_tg_command_error_msg(messages: dict[str, str], err: str, name: str,
     ).strip()
 
 
-def should_run(schedule: str) -> bool:
-    base_time = datetime.now().replace(second=0, microsecond=0)
+def should_run(schedule: str, tz: tzinfo | None = None) -> bool:
+    base_time = datetime.now(tz=tz).replace(second=0, microsecond=0)
     cron = croniter(schedule, base_time)
 
     return cron.get_prev(datetime) == base_time or cron.get_next(datetime) == base_time
@@ -489,8 +491,26 @@ def check_config(config):
             if field_name not in COMMAND_REQUIRED_FIELDS and field_name not in COMMAND_DEFAULT:
                 report[cmd_name][Color.WARNING][field_name] = 'unknown field, ignored'
 
-    # Check global summary_schedule parameter
+    # Check global parameters
     global_report = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
+
+    timezone_name = get_timezone_name(config)
+
+    if timezone_name == '':
+        global_report[Color.WARNING]['timezone'] = \
+            f"not found, the machine timezone is used ({machine_timezone_name()})"
+    elif build_timezone(timezone_name) is not None:
+        global_report[Color.SUCCESS]['timezone'] = timezone_name
+    else:
+        message = f"unknown timezone: '{timezone_name}'"
+        suggestions = difflib.get_close_matches(timezone_name, sorted(available_timezones()), n=10, cutoff=0.6)
+
+        if suggestions:
+            message += "\n    did you mean: " + ", ".join(suggestions)
+
+        message += ("\n    full list: python3 -c \"import zoneinfo; "
+                    "print('\\n'.join(sorted(zoneinfo.available_timezones())))\"")
+        global_report[Color.ERROR]['timezone'] = message
 
     if 'summary_schedule' not in config:
         global_report[Color.WARNING]['summary_schedule'] = 'not found, summary reports will not be sent'
@@ -530,6 +550,53 @@ def is_valid_cron(schedule: str) -> bool:
         return True
     except (CroniterBadCronError, CroniterBadDateError):
         return False
+
+
+def get_timezone_name(config: dict) -> str:
+    """Return the configured timezone name, or an empty string if not set."""
+    return str(config.get('timezone', '') or '').strip()
+
+
+def build_timezone(name: str) -> ZoneInfo | None:
+    """Return a ZoneInfo for an IANA timezone name, or None if the name is unknown."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def resolve_timezone(config: dict) -> tzinfo | None:
+    """Resolve config['timezone'] to a tzinfo, or None to use the machine timezone.
+
+    An unknown value is fatal: a silently wrong timezone means silently wrong
+    schedules, which is worse than not running at all.
+    """
+    name = get_timezone_name(config)
+
+    if name == '':
+        return None
+
+    tz = build_timezone(name)
+
+    if tz is None:
+        color_text(f"Invalid timezone: '{name}'. Run --check-config to see valid values.", Color.ERROR)
+
+        exit(1)
+
+    return tz
+
+
+def now_for_display(tz: tzinfo | None) -> datetime:
+    """Current time as an aware datetime, so '%Z' renders the zone name.
+
+    Falls back to the machine timezone when tz is None.
+    """
+    return datetime.now(tz=tz) if tz is not None else datetime.now().astimezone()
+
+
+def machine_timezone_name() -> str:
+    """Human-readable name of the timezone the machine is running in."""
+    return datetime.now().astimezone().tzname() or 'unknown'
 
 
 def main():
@@ -584,6 +651,13 @@ def main():
 
         if args.debug:
             color_text("[DEBUG] Messages loaded successfully", Color.SUCCESS)
+
+        # Fail fast on a bad timezone, before any check runs.
+        # --check-config reports it as part of its report instead of aborting.
+        tz = None if args.check_config else resolve_timezone(config)
+
+        if args.debug:
+            color_text(f"[DEBUG] Timezone: {get_timezone_name(config) or machine_timezone_name()}", Color.QUOTATION)
 
         if args.test_notifications:
             if args.debug:
@@ -651,7 +725,7 @@ def main():
 
         if args.debug:
             color_text(
-                f"[DEBUG] main() finished normally at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"[DEBUG] main() finished normally at {now_for_display(tz).strftime('%Y-%m-%d %H:%M:%S %Z')}",
                 Color.TITLE,
             )
 
@@ -851,7 +925,7 @@ def process_command(cmd_config, cmd_name: str, cache: dict):
     _update_cache(cmd_name, cache, error_message, error_details)
 
 
-def _should_run_check(name: str, schedule: str, cache: dict, force: bool) -> str | None:
+def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tzinfo | None = None) -> str | None:
     """Return run reason ('force'/'schedule'/'down') or None to skip."""
     if force:
         return "force"
@@ -862,7 +936,7 @@ def _should_run_check(name: str, schedule: str, cache: dict, force: bool) -> str
 
     run_by_schedule = False
     try:
-        run_by_schedule = should_run(schedule)
+        run_by_schedule = should_run(schedule, tz)
     except (CroniterBadCronError, CroniterBadDateError):
         pass
 
@@ -878,11 +952,12 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
     """Process all sites and commands according to schedules and error state."""
     processed_count = 0
     skipped_count = 0
+    tz = resolve_timezone(config)
 
     for site_name, site in config.get('sites', {}).items():
         schedule = site.get('schedule', DEFAULT['schedule'])
 
-        if _should_run_check(site_name, schedule, cache, force):
+        if _should_run_check(site_name, schedule, cache, force, tz):
             process_site(site, site_name, cache)
             processed_count += 1
         else:
@@ -891,7 +966,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
     for cmd_name, cmd_config in config.get('commands', {}).items():
         schedule = cmd_config.get('schedule', COMMAND_DEFAULT['schedule'])
 
-        if _should_run_check(cmd_name, schedule, cache, force):
+        if _should_run_check(cmd_name, schedule, cache, force, tz):
             process_command(cmd_config, cmd_name, cache)
             processed_count += 1
         else:
@@ -938,7 +1013,8 @@ def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) ->
     else:
         services_down_text = "🟢 *All services are operational*"
 
-    timestamp = telegram_helper.escape_special_chars(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    now = now_for_display(resolve_timezone(config))
+    timestamp = telegram_helper.escape_special_chars(now.strftime("%Y-%m-%d %H:%M:%S %Z"))
 
     return messages['summary'].format(
         services_down=services_down_text,
@@ -961,12 +1037,8 @@ def should_send_summary(config: dict) -> bool:
 
         return False
 
-    base_time = datetime.now().replace(second=0, microsecond=0)
-
     try:
-        cron = croniter(schedule, base_time)
-
-        return cron.get_prev(datetime) == base_time or cron.get_next(datetime) == base_time
+        return should_run(schedule, resolve_timezone(config))
     except (CroniterBadCronError, CroniterBadDateError):
         return False
 

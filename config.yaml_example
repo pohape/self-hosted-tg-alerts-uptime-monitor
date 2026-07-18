@@ -1,6 +1,11 @@
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
 
+# Optional: IANA timezone for schedules and displayed times.
+# If not set, the machine timezone is used — you only need this when the server
+# clock is in a different timezone than the one you write your schedules in.
+# timezone: 'Europe/Moscow'
+
 # Optional: proxy for Telegram API calls only (does NOT affect site/command checks).
 # Useful when the host cannot reach api.telegram.org directly (e.g. blocked by an ISP or firewall).
 # Supported schemes: http, https, socks5, socks5h.
