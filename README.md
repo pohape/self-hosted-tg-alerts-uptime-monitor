@@ -373,6 +373,13 @@ Command configuration fields:
 - **timeout** (optional, default is 30): Command timeout in seconds
 - **schedule**, **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
 
+> **`command` and `tg_chats_to_notify` are required** (for sites: `url` and
+> `tg_chats_to_notify`). A check missing one of them cannot run, and that is reported as a
+> failure of the check itself — an alert is sent and the check shows up in the state file.
+> If the missing field is `tg_chats_to_notify`, the alert goes to every chat mentioned
+> anywhere in the config, so it always has somewhere to go. Use `--check-config` to see all
+> missing and defaulted fields at once.
+
 ### 🔄 Smart Recovery Notifications
 
 - 🚨 One alert after N consecutive failures (no spam or duplicate messages)

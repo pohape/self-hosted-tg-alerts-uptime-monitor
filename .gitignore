@@ -2,3 +2,5 @@
 config.yaml
 __pycache__/
 cache.json
+venv/
+.venv/

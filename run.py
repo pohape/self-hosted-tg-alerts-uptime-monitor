@@ -375,9 +375,47 @@ def get_uniq_chat_ids(chat_ids):
     return set(map(str, chat_ids))
 
 
+def collect_all_chat_ids(config: dict) -> set:
+    """Every chat ID mentioned anywhere in the config."""
+    all_chat_ids = set()
+
+    for check in list(config.get('sites', {}).values()) + list(config.get('commands', {}).values()):
+        if 'tg_chats_to_notify' in check:
+            all_chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
+
+    return all_chat_ids
+
+
+def resolve_chat_ids(check_cfg: dict, config: dict) -> set:
+    """Recipients for one check.
+
+    A check whose config is incomplete may itself be missing 'tg_chats_to_notify' — and
+    that missing field is exactly what needs reporting. Falling back to every chat in the
+    config keeps such an alert from having nowhere to go.
+    """
+    if 'tg_chats_to_notify' in check_cfg:
+        return get_uniq_chat_ids(check_cfg['tg_chats_to_notify'])
+
+    return collect_all_chat_ids(config)
+
+
 def check_writing_to_cache():
+    """Prove the cache file is writable — WITHOUT discarding what is in it.
+
+    This used to write an empty dict. That silently reset every check's
+    failure counter and its "already notified" flag, so a diagnostic flag
+    (`--check-config`, `--test-notifications`, `--id-bot-mode`) quietly
+    degraded monitoring: an ongoing outage restarted its countdown to
+    `notify_after_attempt`, and something already reported could be
+    reported again. Nothing looked wrong, which is what made it bad.
+
+    Writing back what was just read proves the same thing — the file opens
+    for writing and JSON serialises — and keeps the state. A missing or
+    unreadable file yields `{}` from `load_cache`, so the first run still
+    creates it.
+    """
     try:
-        save_cache(CACHE_PATH, {})
+        save_cache(CACHE_PATH, load_cache(CACHE_PATH))
     except Exception as e:
         color_text(f"Error saving cache, check permissions: {CACHE_PATH}\n{e}", Color.ERROR)
 
@@ -772,13 +810,14 @@ def process_cache(cache, config, messages):
                 tg_msg = generate_tg_error_msg(
                     messages,
                     last_error['msg'],
-                    site_name=last_error['site_name'],
-                    url=last_error['url'],
-                    follow_redirects=last_error['follow_redirects'],
-                    method=last_error['method'],
-                    timeout=last_error['timeout'],
-                    post_data=last_error['post_data'],
-                    headers=last_error['headers'],
+                    # A misconfigured site records only what it has, so read defensively
+                    site_name=last_error.get('site_name', name),
+                    url=last_error.get('url', ''),
+                    follow_redirects=last_error.get('follow_redirects', DEFAULT['follow_redirects']),
+                    method=last_error.get('method', DEFAULT['method']),
+                    timeout=last_error.get('timeout', DEFAULT['timeout']),
+                    post_data=last_error.get('post_data'),
+                    headers=last_error.get('headers'),
                     count=failed_attempts,
                 )
             else:
@@ -792,7 +831,7 @@ def process_cache(cache, config, messages):
 
             all_sent = True
 
-            for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
+            for chat_id in resolve_chat_ids(check_cfg, config):
                 if telegram_helper.send_message(config, chat_id, tg_msg) is not None:
                     all_sent = False
 
@@ -810,7 +849,7 @@ def process_cache(cache, config, messages):
             )
 
             all_sent = True
-            for chat_id in get_uniq_chat_ids(check_cfg['tg_chats_to_notify']):
+            for chat_id in resolve_chat_ids(check_cfg, config):
                 if telegram_helper.send_message(config, chat_id, msg) is not None:
                     all_sent = False
 
@@ -822,7 +861,16 @@ def process_cache(cache, config, messages):
 def process_site(site, site_name: str, cache: dict):
     for field in REQUIRED_FIELDS:
         if field not in site:
-            color_text(f"Skipping '{site_name}': missing required field '{field}'", Color.ERROR)
+            # See process_command(): a silently skipped check is worse than a noisy one,
+            # because nothing ever tells you the check is not running.
+            error_message = f"misconfigured: required field '{field}' is missing"
+            color_text(f"'{site_name}': {error_message}", Color.ERROR)
+            _update_cache(
+                site_name,
+                cache,
+                error_message,
+                {'msg': error_message, 'site_name': site_name, 'url': site.get('url', '')},
+            )
 
             return
 
@@ -903,7 +951,16 @@ def _update_cache(name: str, cache: dict, error_message: str | None, error_detai
 def process_command(cmd_config, cmd_name: str, cache: dict):
     for field in COMMAND_REQUIRED_FIELDS:
         if field not in cmd_config:
-            color_text(f"Skipping '{cmd_name}': missing required field '{field}'", Color.ERROR)
+            # Reporting this to stdout only hides it: under cron nobody reads stdout, so the
+            # check silently never runs. Treat it as a failure of the check itself.
+            error_message = f"misconfigured: required field '{field}' is missing"
+            color_text(f"'{cmd_name}': {error_message}", Color.ERROR)
+            _update_cache(
+                cmd_name,
+                cache,
+                error_message,
+                {'msg': error_message, 'command': cmd_config.get('command', '')},
+            )
 
             return
 
@@ -1070,11 +1127,7 @@ def send_summary_if_due(config, cache: dict, messages):
     # Only send summary if there are services down
     if has_services_down:
         summary_msg = generate_summary_msg(messages, cache, config)
-        all_chat_ids = set()  # Collect all unique chat IDs from all sites and commands
-
-        for check in list(config.get('sites', {}).values()) + list(config.get('commands', {}).values()):
-            if 'tg_chats_to_notify' in check:
-                all_chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
+        all_chat_ids = collect_all_chat_ids(config)
 
         for chat_id in all_chat_ids:
             telegram_helper.send_message(config, chat_id, summary_msg)
