@@ -132,3 +132,37 @@ class FailoverTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TokenIsNeverPrintedTest(unittest.TestCase):
+    """The token lives in the URL path of every call, so whatever quotes a
+    failed request quotes the credential with it — and failover messages quote
+    failed requests by definition. Caught on a live run: the first warning
+    printed the full URL, token included, straight into cron mail.
+    """
+
+    def test_failover_warning_masks_the_token(self):
+        import io
+        from contextlib import redirect_stdout
+
+        # Токен правдоподобной формы, а не односимвольный `T` из общего стенда:
+        # с одной буквой маскировка съела бы каждую `T` в тексте, и тест мерил
+        # бы собственную выдумку вместо поведения.
+        token = '8531861837:AAHFAKEfakeFAKEfakeFAKEfakeFAKEfake'
+        config = dict(CONFIG_TWO, telegram_bot_token=token)
+        # Настоящий requests кладёт в текст ошибки полный URL — воспроизводим
+        # это дословно, иначе тест мерил бы удобную выдумку.
+        blown = requests.ConnectionError(
+            f"HTTPSConnectionPool(host='first.example', port=443): "
+            f"Max retries exceeded with url: /bot{token}/getMe")
+        out = io.StringIO()
+
+        with redirect_stdout(out), patch.object(th.requests, 'request',
+                                                side_effect=[blown, _Response()]):
+            th.api_request(config, 'GET', '/getMe')
+
+        self.assertNotIn(token, out.getvalue())
+        self.assertIn('<token>', out.getvalue())
+
+    def test_masking_survives_a_missing_token(self):
+        self.assertEqual('boom', th.hide_token('boom', ''))
