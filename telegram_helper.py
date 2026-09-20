@@ -74,6 +74,19 @@ def get_api_base(config: dict) -> str:
     return f"https://{get_api_hosts(config)[0]}"
 
 
+def hide_token(value, token: str) -> str:
+    """Render `value` with the bot token masked out.
+
+    The token travels in the URL PATH of every Bot API call, so anything that
+    quotes a failed request — `requests` exception text above all — quotes the
+    token with it. Those lines end up in cron mail, logs and terminal
+    scrollback, where a token is a credential lying in the open.
+    """
+    text = str(value)
+
+    return text.replace(token, '<token>') if token else text
+
+
 def api_request(config: dict, method: str, path: str, **kwargs) -> dict:
     """Call the Bot API, walking the configured hosts until one answers.
 
@@ -90,12 +103,13 @@ def api_request(config: dict, method: str, path: str, **kwargs) -> dict:
     notification channel would defeat the purpose of the tool.
     """
     hosts = get_api_hosts(config)
+    token = config['telegram_bot_token']
     kwargs.setdefault('timeout', API_TIMEOUT_SEC)
     kwargs.setdefault('proxies', get_proxies(config))
     last_error = None
 
     for host in hosts:
-        url = f"https://{host}/bot{config['telegram_bot_token']}{path}"
+        url = f"https://{host}/bot{token}{path}"
 
         try:
             response = requests.request(method, url, **kwargs)
@@ -109,8 +123,9 @@ def api_request(config: dict, method: str, path: str, **kwargs) -> dict:
             last_error = error
 
             if host != hosts[-1]:
-                color_text(f"Telegram API host {host} failed ({error}); "
-                           f"trying the next one", Color.WARNING)
+                color_text(f"Telegram API host {host} failed "
+                           f"({hide_token(error, token)}); trying the next one",
+                           Color.WARNING)
 
     raise last_error
 
