@@ -23,25 +23,100 @@ def get_proxies(config: dict):
     return {'http': proxy, 'https': proxy}
 
 
-def get_api_base(config: dict) -> str:
-    """Return the base URL for the Telegram Bot API, without a trailing slash.
+DEFAULT_API_HOST = 'api.telegram.org'
 
-    The host defaults to the official ``api.telegram.org``. Set the optional
-    top-level ``telegram_api_host`` to a host that mirrors the Bot API (your
-    own reverse proxy, e.g. ``api.example.com``) to route calls through it —
-    useful where ``api.telegram.org`` is blocked by SNI-based DPI and an
-    SSH/SOCKS tunnel is undesirable. Provide a bare hostname; any scheme or
-    trailing slash is stripped, and HTTPS is always used.
+# Без срока запрос к мёртвому зеркалу висит до победного, и запасной адрес не
+# получает шанса: резервирование без таймаута — это резервирование на бумаге.
+API_TIMEOUT_SEC = 15
+
+# getUpdates держит долгий поллинг (``timeout`` в параметрах запроса), поэтому
+# HTTP-срок обязан его пережить, иначе штатное ожидание выглядело бы отказом.
+LONG_POLL_TIMEOUT_SEC = 120
+
+
+def get_api_hosts(config: dict) -> list:
+    """Return Bot API hosts in preference order, normalised and de-duplicated.
+
+    ``telegram_api_host`` accepts EITHER a single host or a list of them:
+
+        telegram_api_host: 'api-mirror.example.com'
+
+        telegram_api_host:
+          - 'api-mirror.example.com'
+          - 'api-mirror2.example.com'
+
+    A list is what makes the alert channel survive the loss of one mirror: if
+    the first host cannot be reached, the next one is tried within the same
+    call. That matters when the monitor watches the very machine its mirror
+    runs on — with a single host, the outage you most need to hear about is
+    exactly the one that silences you.
+
+    Hosts are bare names; any scheme or trailing slash is stripped and HTTPS is
+    always used. Empty entries are dropped, and an empty list falls back to the
+    official host — an unreachable configuration is worse than the default.
     """
-    host = config.get('telegram_api_host', 'api.telegram.org').strip()
-    host = host.replace('https://', '').replace('http://', '').strip('/')
+    raw = config.get('telegram_api_host', DEFAULT_API_HOST)
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    hosts = []
 
-    return f"https://{host}"
+    for value in values:
+        host = str(value or '').strip()
+        host = host.replace('https://', '').replace('http://', '').strip().strip('/')
+
+        if host and host not in hosts:
+            hosts.append(host)
+
+    return hosts or [DEFAULT_API_HOST]
+
+
+def get_api_base(config: dict) -> str:
+    """Return the base URL of the PRIMARY Bot API host, without a trailing slash."""
+    return f"https://{get_api_hosts(config)[0]}"
+
+
+def api_request(config: dict, method: str, path: str, **kwargs) -> dict:
+    """Call the Bot API, walking the configured hosts until one answers.
+
+    A host is considered DEAD, and the next one is tried, when the request
+    fails at the transport level, when the host replies 5xx, or when the body
+    is not JSON. All three describe a broken mirror: our own reverse proxy
+    returns 502/HTML exactly while the machine behind it is dying.
+
+    A 4xx with a JSON body is an ANSWER, not a failure — Telegram itself says
+    "wrong token" or "chat not found" that way, and repeating the question at
+    another mirror would only repeat the answer.
+
+    When every host fails, the last error is raised: silence about a broken
+    notification channel would defeat the purpose of the tool.
+    """
+    hosts = get_api_hosts(config)
+    kwargs.setdefault('timeout', API_TIMEOUT_SEC)
+    kwargs.setdefault('proxies', get_proxies(config))
+    last_error = None
+
+    for host in hosts:
+        url = f"https://{host}/bot{config['telegram_bot_token']}{path}"
+
+        try:
+            response = requests.request(method, url, **kwargs)
+
+            if response.status_code >= 500:
+                raise requests.RequestException(
+                    f"{host} answered {response.status_code}")
+
+            return response.json()
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+
+            if host != hosts[-1]:
+                color_text(f"Telegram API host {host} failed ({error}); "
+                           f"trying the next one", Color.WARNING)
+
+    raise last_error
 
 
 def get_bot_link(config: dict) -> str:
-    url = f"{get_api_base(config)}/bot{config['telegram_bot_token']}/getMe"
-    response = requests.get(url, proxies=get_proxies(config)).json()
+    response = api_request(config, 'GET', '/getMe')
 
     if response.get("ok") and "result" in response:
         username = response["result"].get("username")
@@ -142,22 +217,19 @@ def escape_special_chars(text):
 
 
 def send_message(config, chat_id, message):
-    url = '{}/bot{}/sendMessage'.format(get_api_base(config), config['telegram_bot_token'])
-
     data = {
         "chat_id": chat_id,
         "text": message,
         "parse_mode": "MarkdownV2"
     }
 
-    response = requests.post(
-        url,
+    response_parsed = api_request(
+        config,
+        'POST',
+        '/sendMessage',
         headers={"Content-Type": "application/json"},
         data=json.dumps(data),
-        proxies=get_proxies(config),
     )
-
-    response_parsed = response.json()
 
     if response_parsed['ok']:
         color_text(f"A message sent to {chat_id} successfully.", Color.SUCCESS)
@@ -171,13 +243,9 @@ def send_message(config, chat_id, message):
 
 def get_updates(config, offset=None):
     params = {'timeout': 100, 'offset': offset}
-    response = requests.get(
-        f"{get_api_base(config)}/bot{config['telegram_bot_token']}/getUpdates",
-        params=params,
-        proxies=get_proxies(config),
-    )
 
-    return response.json()
+    return api_request(config, 'GET', '/getUpdates', params=params,
+                       timeout=LONG_POLL_TIMEOUT_SEC)
 
 
 def handle_message(config, message):
