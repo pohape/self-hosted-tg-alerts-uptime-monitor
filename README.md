@@ -295,7 +295,7 @@ sites:
 - **telegram_bot_token**: Your Telegram bot token obtained from @BotFather.
 - **timezone** (optional, default is the machine timezone): IANA timezone name (e.g. `Europe/Moscow`) used for all `schedule` / `summary_schedule` expressions and for the times shown in reports. You only need it when the server clock is in a different timezone than the one you write your schedules in. An unknown value stops the script with an error; run `python3 run.py --check-config` to see the valid ones.
 - **summary_schedule** (optional): Cron expression that defines when a consolidated downtime summary should be sent. A message is generated only if at least one monitored service is still failing at that moment.
-- **telegram_api_host** (optional, default is `api.telegram.org`): Host of the Telegram Bot API. Point it to your own mirror (e.g. `api.example.com`) to bypass blocking without a tunnel. See [Bypassing Telegram Blocking](#-bypassing-telegram-blocking). Provide a bare hostname — scheme/trailing slash are ignored and HTTPS is always used.
+- **telegram_api_host** (optional, default is `api.telegram.org`): Host of the Telegram Bot API, or a **list of hosts** tried in order. Point it to your own mirror (e.g. `api.example.com`) to bypass blocking without a tunnel; give it two mirrors on different machines so losing one of them does not silence the alerts. See [Bypassing Telegram Blocking](#-bypassing-telegram-blocking). Provide bare hostnames — scheme/trailing slash are ignored and HTTPS is always used.
 - **sites**: A list of sites to monitor.
 - **url**: The URL of the site to monitor.
 - **follow_redirects**: (optional, default is False): Whether to follow HTTP redirects during the request.
@@ -502,6 +502,30 @@ telegram_api_host: 'api.example.com'
 ```
 
 Leave `telegram_proxy` unset when using this approach.
+
+#### Two mirrors are better than one
+
+`telegram_api_host` also accepts a **list**, and a call walks it until one host
+answers:
+
+```yaml
+telegram_api_host:
+  - 'api.example.com'
+  - 'api2.example.com'
+```
+
+This matters most when the monitor watches the very machine its mirror runs on.
+With a single host, the outage you most need to hear about — that machine going
+down — is exactly the one that takes your alert channel with it. Put the second
+mirror on a different machine, ideally in a different datacentre.
+
+A host is skipped and the next one tried when the request fails at the
+transport level, when the host answers 5xx, or when the body is not JSON — all
+three describe a broken mirror (a dying reverse proxy answers 502 with an HTML
+error page). A 4xx with a JSON body is an *answer* from Telegram itself
+("wrong token", "chat not found"), so it is returned as-is instead of being
+retried elsewhere. If every host fails, the error is raised rather than
+swallowed: a notification channel that breaks quietly is worse than none.
 
 ### 💬 Contributing
 
