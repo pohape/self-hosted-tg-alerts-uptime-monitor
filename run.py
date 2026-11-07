@@ -262,9 +262,12 @@ def perform_command(command: str, timeout: int, search: str, absent: str, min_va
         return f"Command timed out after {timeout}s"
 
     if result.returncode != 0:
-        stderr = result.stderr.strip()[:200]
+        # A health command that prints its verdict to stdout (OK/DOWN + exit code)
+        # leaves stderr empty; without the stdout fallback the alert would say only
+        # "exited with code 1" and hide what is down.
+        detail = (result.stderr.strip() or result.stdout.strip())[:200]
 
-        return f"Command exited with code {result.returncode}: {stderr}"
+        return f"Command exited with code {result.returncode}: {detail}"
 
     output = result.stdout.strip()
 
