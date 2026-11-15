@@ -300,7 +300,7 @@ sites:
 - **url**: The URL of the site to monitor.
 - **follow_redirects**: (optional, default is False): Whether to follow HTTP redirects during the request.
 - **method** (optional, default is GET): The HTTP method to use (GET, POST, HEAD).
-- **headers** (optional): A dictionary of HTTP headers to include in the request.
+- **headers** (optional): A dictionary of HTTP headers to include in the request. The alert shows a cURL command to replicate the request; in it the values of `Authorization`, `Proxy-Authorization`, `Cookie` and `X-Api-Key` are replaced with `<hidden>`, so credentials never reach the Telegram chat.
 - **response_headers** (optional): A list of response header rules. Each rule must contain `name` and exactly one of `contains` or `absent`.
 - **post_data** (optional): Only for the POST method.
 - **status_code** (optional, default is 200): An expected HTTP status code.
