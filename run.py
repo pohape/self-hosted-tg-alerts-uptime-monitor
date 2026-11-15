@@ -138,13 +138,19 @@ def get_server_info():
     return f"```SERVER\n{hostname_escaped} ({socket.gethostbyname(hostname)})```"
 
 
+CREDENTIAL_HEADERS = {'authorization', 'proxy-authorization', 'cookie', 'x-api-key'}
+CREDENTIAL_PLACEHOLDER = '<hidden>'
+
+
 def generate_curl_command(url: str,
                           follow_redirects: bool,
                           method: str,
                           timeout: int,
                           post_data: str = None,
                           headers: dict = None):
-    header_options = ' '.join([f"-H '{key}: {value}'" for key, value in headers.items()]) if headers else ''
+    # The command lands in a Telegram alert: a credential header shows its name, never its value.
+    header_options = ' '.join([f"-H '{key}: {CREDENTIAL_PLACEHOLDER if key.lower() in CREDENTIAL_HEADERS else value}'"
+                               for key, value in headers.items()]) if headers else ''
     base = f"curl --max-time {timeout} -v{' ' + header_options if header_options else ''} '{url}'"
 
     if follow_redirects:
