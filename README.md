@@ -34,7 +34,7 @@ Get instant **Telegram alerts** after N failures and a recovery notification whe
      * ✅ response_headers contains: Verify a response header contains a specific substring
      * ❌ response_headers absent: Verify a response header does not contain a specific substring
 - 🛠️ **Custom Headers** & POST data
-- 🕒 **Flexible Cron Scheduling** per site
+- 🕒 **Flexible Cron Scheduling** per check, with automatic once-a-minute re-checks while something is down
 - 💬 **Telegram Alerts** on errors & recovery
 - 📊 **Summary Reports**: one consolidated scheduled Telegram report of all services that are still down
 - ⚙️ **YAML-Based Config** — easy to read, edit, and version
@@ -107,6 +107,7 @@ Force a one-time check of all sites, commands and domains:
 ```shell
 python3 run.py --force
 ```
+Or just one of them: `python3 run.py --only homepage` (see [Usage](#usage)).
 ![Step 7](https://raw.githubusercontent.com/pohape/self-hosted-tg-alerts-uptime-monitor-assets/main/step7.gif)
 
 #### 🕒 8. Add to crontab
@@ -118,7 +119,7 @@ Then add this line (replace **/path/to/repo** with the actual path to your clone
 ```shell
 * * * * * /path/to/repo/venv/bin/python /path/to/repo/run.py
 ```
-📅 The entry point runs every minute, but each site is checked according to its own schedule, defined in the **config.yaml** using cron syntax
+📅 The entry point runs every minute, but each healthy check runs according to its own schedule, defined in the **config.yaml** using cron syntax. Once a site or command fails, it is re-checked every minute until it recovers (a domain — at most once an hour), see [Schedule, retries and `notify_after_attempt`](#-schedule-retries-and-notify_after_attempt)
 ![Step 8](https://raw.githubusercontent.com/pohape/self-hosted-tg-alerts-uptime-monitor-assets/main/step8.gif)
 
 #### ⏰ 9. Simulate downtime and recovery (optional)
@@ -151,11 +152,36 @@ python3 run.py --force
 ```
 Example results:
 ```diff
-+ Request to home_page completed successfully.
++ home_page completed successfully
 
-- Error for not_found: Expected status code '404', but got '200'
-+ A message with the error sent to 5487855 successfully
+- Expected status code [404], but got '200'
++ A message sent to 5487855 successfully.
 ```
+
+#### To check only some checks immediately:
+
+```shell
+python3 run.py --only home_page
+python3 run.py --only home_page --only backup_sync_check   # repeat the flag...
+python3 run.py --only home_page,backup_sync_check,shop_domain  # ...or separate names with commas
+```
+
+`--only NAME` is `--force` for the named checks only. A name can be any site, command or
+domain (names are unique across the three sections). Notes:
+
+- It is a real run, not a dry run: it takes the same lock as the cron job, updates the same
+  state file and goes through the same alerting logic. A failing check counts as one more
+  failed attempt and **may send the DOWN alert** if that reaches `notify_after_attempt`;
+  a check that recovers sends the "back online" message.
+- The named checks run right now regardless of their schedule. For a failing domain the
+  hourly retry limit is ignored too — you asked for the lookup explicitly.
+- All other checks are skipped and their state is left untouched (no retries, no pending
+  alerts for them); the summary report is not sent either — that stays the cron job's work.
+- An unknown name is an error: the script lists the unknown and the known names and exits
+  with code 2 without running anything.
+- If the cron run of the same minute is still in progress, the script exits with
+  "Another instance is already running" — just repeat the command a few seconds later.
+- It cannot be combined with `--force`, `--check-config`, `--test-notifications` or `--id-bot-mode`.
 
 #### To check the configuration for any issues:
 
@@ -190,9 +216,9 @@ The configuration is done through the **config.yaml** file. Below is an example 
 ```yaml
 # Your Telegram Bot Token
 telegram_bot_token: 'YOUR_TELEGRAM_BOT_TOKEN'
-+timezone: 'Europe/Moscow'  # (optional) schedules and displayed times use the machine timezone if not set
-+summary_schedule: '0 17 * * *'  # (optional) daily summary at 17:00 if at least one site is down
-+telegram_proxy: 'socks5h://127.0.0.1:1080'  # (optional) proxy for Telegram API calls only
+timezone: 'Europe/Moscow'  # (optional) schedules and displayed times use the machine timezone if not set
+summary_schedule: '0 17 * * *'  # (optional) daily summary at 17:00 if at least one site is down
+telegram_proxy: 'socks5h://127.0.0.1:1080'  # (optional) proxy for Telegram API calls only
 
 sites:
   # 1. GET request to the main page where we look for "<body>"
@@ -308,9 +334,9 @@ sites:
 - **search_string** (optional): String that must be present in the HTTP response body for the check to pass.
 - **absent_string** (optional): String that must be absent in the HTTP response body for the check to pass. Useful for detecting unexpected errors or messages.
 - **timeout** (optional, default is 5): The timeout for the request in seconds.
-- **schedule** (optional, default is '* * * * *'): The cron-like schedule for monitoring the site.
+- **schedule** (optional, default is '* * * * *'): The cron-like schedule for checking the site while it is healthy. A failing site is re-checked every minute regardless of it, see below.
 - **tg_chats_to_notify**: List of Telegram chat IDs to notify in case of an error.
-- **notify_after_attempt** (optional, default is 1): Number of consecutive failures required before a Telegram alert is sent. Helps to reduce false alarms from temporary glitches.
+- **notify_after_attempt** (optional, default is 1): Number of consecutive failed checks required before a Telegram alert is sent. Helps to reduce false alarms from temporary glitches. Retries run every minute, so this is roughly "minutes of downtime", not "schedule periods" — see below.
 
 If both **search_string** and **absent_string** are specified, both conditions must be satisfied for the site check to be considered successful.
 
@@ -329,6 +355,41 @@ response_headers:
 - **absent**: Passes if the response header is missing, or if the given substring is not present in its value.
 
 Header checks work for all HTTP methods, including `HEAD`.
+
+### 🔁 Schedule, retries and `notify_after_attempt`
+
+The `schedule` only decides when a **healthy** check runs. As soon as a check fails, it leaves
+its schedule:
+
+- a failing **site** or **command** is re-checked **every minute** (the cron cadence of
+  `run.py`) until it passes again;
+- a failing **domain** is re-checked **at most once an hour**, to stay polite to the registries;
+- after recovery the check returns to its own schedule.
+
+`notify_after_attempt` counts these consecutive failed checks. So it is the retries, not the
+schedule, that decide how soon you hear about an outage. Example:
+
+```yaml
+sites:
+  hourly_page:
+    url: "https://example.com/"
+    schedule: "3 * * * *"      # hourly, at minute 3
+    notify_after_attempt: 10
+    tg_chats_to_notify:
+      - '1234567890'
+```
+
+Say the site goes down at 10:05. The 10:03 check has already passed, so the next scheduled
+check at 11:03 is the first failed attempt. From then on the site is checked every minute:
+11:04 is attempt 2, … 11:12 is attempt 10, and the alert goes out at 11:12. In other words the
+alert comes about 10 minutes after the first failed check (the 10th check, 9 minutes after the
+first one); the worst case from the start of the outage is ~1 hour until a scheduled check
+catches it plus ~9 minutes of retries — **not** 10 hours.
+
+For a domain the same setting means hours: `notify_after_attempt: 2` alerts on the second
+failed lookup, about an hour after the first one.
+
+A manual `--force` / `--only` run of a failing check is one more attempt as well.
 
 ### Shell Command Monitoring
 
@@ -372,7 +433,7 @@ Command configuration fields:
 - **absent_string** (optional): String that must NOT be present in stdout
 - **min_value** (optional): If set, stdout is parsed as an integer and an alert is triggered if the value is below this threshold
 - **timeout** (optional, default is 30): Command timeout in seconds
-- **schedule**, **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
+- **schedule**, **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites (a failing command is re-checked every minute too)
 
 > **`command` and `tg_chats_to_notify` are required** (for sites: `url` and
 > `tg_chats_to_notify`; for domains: `domain` and `tg_chats_to_notify`). A check missing one of them cannot run, and that is reported as a
@@ -414,10 +475,10 @@ Domain configuration fields:
 
 - **domain**: The domain name, Unicode or punycode (required)
 - **warn_days** (optional, default is 30): Alert when fewer days than this are left
-- **schedule** (optional, default is `'0 9 * * *'`, daily at 09:00): When to look the domain up
+- **schedule** (optional, default is `'0 9 * * *'`, daily at 09:00): When to look the domain up while it is fine; a failing lookup is retried hourly instead
 - **timeout** (optional, default is 10): Lookup timeout in seconds
 - **whois_server** (optional): Query this whois server instead of the automatic choice — for TLDs without RDAP
-- **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
+- **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites, but with hourly retries each attempt is an hour apart
 
 Names must be unique across `sites`, `commands` and `domains`; `--check-config` reports a clash,
 an invalid domain, a non-positive `warn_days` and a bad cron expression, and shows which data
@@ -434,7 +495,7 @@ Where the data comes from (standard library and `requests` only, no extra depend
 
 Limits worth knowing:
 
-- Each domain is looked up once per scheduled run, and a failing domain is retried at most once an hour (sites and commands retry every minute). Registries rate-limit whois; daily checks stay far below any limit.
+- Each domain is looked up once per scheduled run, and a failing domain is retried at most once an hour (sites and commands retry every minute); only an explicit `--only` lookup ignores that limit. Registries rate-limit whois; daily checks stay far below any limit.
 - The IANA bootstrap file is cached in `/tmp` for a day; if it cannot be refreshed, the stale copy is used.
 - Some ccTLDs publish neither RDAP nor an expiry date in whois (e.g. `.de`). For a TLD missing from the IANA bootstrap the check fails with a message asking for `whois_server`; it works only if that server's answer contains `paid-till`, `Registry Expiry Date`, `Registrar Registration Expiration Date`, `Expiration Date` or `Expiry Date`.
 - The expiry date is the registry's. Registrars often renew on the last day or suspend the domain a little before it, so keep `warn_days` comfortably large.
@@ -443,7 +504,7 @@ Limits worth knowing:
 ### 🔄 Smart Recovery Notifications
 
 - 🚨 One alert after N consecutive failures (no spam or duplicate messages)
-- 🔁 Continues checking once a minute during downtime (ignoring the original schedule temporarily); a failing domain check is repeated once an hour instead, to stay polite to the registries
+- 🔁 Continues checking once a minute during downtime (ignoring the original schedule temporarily); a failing domain check is repeated once an hour instead, to stay polite to the registries. See [Schedule, retries and `notify_after_attempt`](#-schedule-retries-and-notify_after_attempt)
 - ✅ "Back online" message sent when site recovers, with:
   - Duration of downtime (in minutes)
   - Number of failed checks
