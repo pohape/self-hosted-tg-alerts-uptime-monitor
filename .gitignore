@@ -4,3 +4,6 @@ __pycache__/
 cache.json
 venv/
 .venv/
+# Local config backups hold the same secrets as config.yaml
+config.yaml.bak*
+*.bak.*
