@@ -285,9 +285,14 @@ class EvaluateTest(unittest.TestCase):
     def test_expired_domain(self):
         result = dh.parse_whois(TCI_EXPIRED, 'xn----7sbbidrladocjjty7ire.xn--p1ai', 'whois whois.tcinet.ru')
         message = dh.evaluate(result, 30, NOW)
-        self.assertIn('EXPIRED on 2026-11-16 (5 days ago)', message)
+        self.assertIn('EXPIRED on 2026-11-16 (expired 5 days ago)', message)
         self.assertIn('клиника-жигаловых.рф', message)
         self.assertIn('2026-12-17', message)
+
+    def test_remaining_is_never_negative(self):
+        expired = datetime(2026, 11, 16, 10, 15, tzinfo=timezone.utc)
+        self.assertEqual('expired 5 days ago', dh.describe_remaining(expired, NOW))
+        self.assertEqual('189 days left', dh.describe_remaining(datetime(2027, 5, 30, 11, 40, tzinfo=timezone.utc), NOW))
 
     def test_not_registered(self):
         self.assertIn('not registered', dh.evaluate(info(registered=False, expires=None), 30, NOW))

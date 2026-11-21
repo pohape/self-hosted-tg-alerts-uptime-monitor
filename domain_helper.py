@@ -398,6 +398,16 @@ def days_left(expires: datetime, now: datetime) -> int:
     return int((expires - now).total_seconds() // 86400)
 
 
+def describe_remaining(expires: datetime, now: datetime | None = None) -> str:
+    """'189 days left' or 'expired 5 days ago' — whole days, rounded towards the expiry."""
+    now = now or datetime.now(tz=timezone.utc)
+
+    if expires <= now:
+        return f"expired {int((now - expires).total_seconds() // 86400)} days ago"
+
+    return f"{days_left(expires, now)} days left"
+
+
 def evaluate(info: dict, warn_days: int, now: datetime | None = None) -> str | None:
     """Turn a lookup result into an alert message, or None when all is well."""
     now = now or datetime.now(tz=timezone.utc)
@@ -418,9 +428,7 @@ def evaluate(info: dict, warn_days: int, now: datetime | None = None) -> str | N
     state = f"; registry state: {info['state']}" if info.get('state') else ''
 
     if expires <= now:
-        ago = int((now - expires).total_seconds() // 86400)
-
-        return f"Domain {shown} EXPIRED on {expires:%Y-%m-%d} ({ago} days ago){state}{free}"
+        return f"Domain {shown} EXPIRED on {expires:%Y-%m-%d} ({describe_remaining(expires, now)}){state}{free}"
 
     if info['delegated'] is False:
         return f"Domain {shown} is not delegated (registry state: {info['state']})"

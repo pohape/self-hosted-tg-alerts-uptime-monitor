@@ -10,10 +10,11 @@ and prints a human-readable status to the terminal.
 """
 import argparse
 import time
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 from typing import Any, Dict, Optional
 
 from console_helper import Color, color_text
+from domain_helper import describe_remaining
 from filesystem_helper import load_yaml_or_exit, load_cache
 from run import CACHE_PATH, CONFIG_PATH, DOMAIN_DEFAULT, resolve_timezone
 
@@ -138,8 +139,7 @@ def print_site_status(
 
         if expires_at:
             expires = datetime.fromisoformat(expires_at)
-            days = int((expires - datetime.now(tz=timezone.utc)).total_seconds() // 86400)
-            print(f"  Registration expires: {expires.strftime('%Y-%m-%d')} ({days} days left)")
+            print(f"  Registration expires: {expires.strftime('%Y-%m-%d')} ({describe_remaining(expires)})")
 
     print(f"  Schedule: {schedule}")
     print(f"  Notify after attempts: {notify_after}")

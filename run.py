@@ -1128,8 +1128,8 @@ def process_domain(domain_config, name: str, cache: dict):
     error_message = domain_helper.evaluate(info, warn_days)
 
     if info['expires'] is not None:
-        left = domain_helper.days_left(info['expires'], datetime.now(tz=timezone.utc))
-        color_text(f"{ascii_name} expires on {info['expires']:%Y-%m-%d} ({left} days left), "
+        remaining = domain_helper.describe_remaining(info['expires'])
+        color_text(f"{ascii_name} expires on {info['expires']:%Y-%m-%d} ({remaining}), "
                    f"source: {info['source']}", Color.QUOTATION)
 
     error_details = {
