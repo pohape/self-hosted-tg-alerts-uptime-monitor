@@ -186,8 +186,12 @@ def test_notifications(config, get_uniq_chat_ids):
     # Collect all unique chat IDs
     chat_ids = set()
 
-    for site in config['sites'].values():
-        chat_ids.update(get_uniq_chat_ids(site['tg_chats_to_notify']))
+    for section in ('sites', 'commands', 'domains'):
+        checks = config.get(section)
+
+        for check in (checks.values() if isinstance(checks, dict) else []):
+            if isinstance(check, dict) and isinstance(check.get('tg_chats_to_notify'), list):
+                chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
 
     # Send test message to each chat
     test_message = escape_special_chars('This is a test message from the monitoring script.')

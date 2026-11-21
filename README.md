@@ -1,6 +1,6 @@
 ## 🛡️ Self-hosted Website Uptime Monitor with Telegram Alerts on errors
 
-💬 Monitor your websites using **GET/POST/HEAD** requests, verify **SSL certificates**, and check for **specific content** — all configured via a simple YAML file.  
+💬 Monitor your websites using **GET/POST/HEAD** requests, verify **SSL certificates**, check for **specific content**, and watch **domain registration expiry** — all configured via a simple YAML file.  
 Get instant **Telegram alerts** after N failures and a recovery notification when the site is back online.  
 **No cloud. No lock-in. No Docker. Just Python + crontab.**
 
@@ -26,6 +26,7 @@ Get instant **Telegram alerts** after N failures and a recovery notification whe
 
 - 🔁 **HTTP Methods**: GET, POST, HEAD
 - 🔐 **SSL Certificate Expiry Checks**
+- 🌐 **Domain Registration Expiry Checks**: RDAP for most TLDs, whois for .ru / .рф / .su and regional zones like spb.ru; IDN domains welcome
 - 🧠 **Content Validation**:
      * ✅ search_string: Verify a specific string is present in the response
      * ❌ absent_string: Verify a specific string is absent in the response
@@ -102,7 +103,7 @@ You’ll get a test message in every listed chat — or a clear error if somethi
 ![Step 6](https://raw.githubusercontent.com/pohape/self-hosted-tg-alerts-uptime-monitor-assets/main/step6.gif)
 
 #### 🚀 7. Run a manual check
-Force a one-time check of all sites:
+Force a one-time check of all sites, commands and domains:
 ```shell
 python3 run.py --force
 ```
@@ -143,7 +144,7 @@ python3 run.py --test-notifications
 python3 run.py --id-bot-mode
 ```
 
-#### To force check all sites immediately:
+#### To force check all sites, commands and domains immediately:
 
 ```shell
 python3 run.py --force
@@ -374,16 +375,75 @@ Command configuration fields:
 - **schedule**, **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
 
 > **`command` and `tg_chats_to_notify` are required** (for sites: `url` and
-> `tg_chats_to_notify`). A check missing one of them cannot run, and that is reported as a
+> `tg_chats_to_notify`; for domains: `domain` and `tg_chats_to_notify`). A check missing one of them cannot run, and that is reported as a
 > failure of the check itself — an alert is sent and the check shows up in the state file.
 > If the missing field is `tg_chats_to_notify`, the alert goes to every chat mentioned
 > anywhere in the config, so it always has somewhere to go. Use `--check-config` to see all
 > missing and defaulted fields at once.
 
+### 🌐 Domain Expiry Monitoring
+
+An expired domain takes every site on it down at once — and "site is down" does not tell you
+"pay the registrar". Domain checks watch the registration itself, natively, like the SSL check
+does for certificates. Add a `domains` section to your **config.yaml**:
+
+```yaml
+domains:
+  shop_domain:
+    domain: example.com
+    warn_days: 30            # alert when less than 30 days are left
+    schedule: '0 9 * * *'    # once a day is plenty
+    tg_chats_to_notify:
+      - '1234567890'
+
+  clinic_domain:
+    domain: клиника-пример.рф  # IDN is fine, it is converted to punycode internally
+    notify_after_attempt: 2    # one failed lookup is not worth an alert
+    tg_chats_to_notify:
+      - '1234567890'
+```
+
+An alert is sent when:
+
+- less than **warn_days** days are left before the registration expires;
+- the domain has already **expired** (the alert also shows the registry state and, for .ru/.рф/.su, the `free-date` when anyone else may register it);
+- the registry says the domain is **not registered**, **not delegated**, or has a hold / redemption / pending-delete status;
+- the lookup itself fails (timeout, rate limit, unparseable answer) — use `notify_after_attempt` to ride out a single hiccup.
+
+Domain configuration fields:
+
+- **domain**: The domain name, Unicode or punycode (required)
+- **warn_days** (optional, default is 30): Alert when fewer days than this are left
+- **schedule** (optional, default is `'0 9 * * *'`, daily at 09:00): When to look the domain up
+- **timeout** (optional, default is 10): Lookup timeout in seconds
+- **whois_server** (optional): Query this whois server instead of the automatic choice — for TLDs without RDAP
+- **tg_chats_to_notify**, **notify_after_attempt**: Same as for sites
+
+Names must be unique across `sites`, `commands` and `domains`; `--check-config` reports a clash,
+an invalid domain, a non-positive `warn_days` and a bad cron expression, and shows which data
+source each domain will use.
+
+Where the data comes from (standard library and `requests` only, no extra dependencies):
+
+| Domain | Source | Expiry field |
+|---|---|---|
+| `*.ru`, `*.su`, `*.рф` (second level) | whois `whois.tcinet.ru` (TCI registry) | `paid-till`, plus `state` and `free-date` |
+| `*.org.ru`, `*.net.ru`, `*.pp.ru` | whois `whois.nic.net.ru` (MSK-IX) | `paid-till`, plus `state` and `free-date` |
+| other third-level `.ru` / `.su` (`spb.ru`, `msk.ru`, `com.ru`, …) | whois `whois.flexireg.net` | `Registry Expiry Date` |
+| everything else (`.com`, `.net`, `.org`, most gTLDs and many ccTLDs) | RDAP, server from the [IANA bootstrap](https://data.iana.org/rdap/dns.json) | `expiration` event |
+
+Limits worth knowing:
+
+- Each domain is looked up once per scheduled run, and a failing domain is retried at most once an hour (sites and commands retry every minute). Registries rate-limit whois; daily checks stay far below any limit.
+- The IANA bootstrap file is cached in `/tmp` for a day; if it cannot be refreshed, the stale copy is used.
+- Some ccTLDs publish neither RDAP nor an expiry date in whois (e.g. `.de`). For a TLD missing from the IANA bootstrap the check fails with a message asking for `whois_server`; it works only if that server's answer contains `paid-till`, `Registry Expiry Date`, `Registrar Registration Expiration Date`, `Expiration Date` or `Expiry Date`.
+- The expiry date is the registry's. Registrars often renew on the last day or suspend the domain a little before it, so keep `warn_days` comfortably large.
+- `status.py` shows the expiry date and the days left for every domain check.
+
 ### 🔄 Smart Recovery Notifications
 
 - 🚨 One alert after N consecutive failures (no spam or duplicate messages)
-- 🔁 Continues checking once a minute during downtime (ignoring the original schedule temporarily)
+- 🔁 Continues checking once a minute during downtime (ignoring the original schedule temporarily); a failing domain check is repeated once an hour instead, to stay polite to the registries
 - ✅ "Back online" message sent when site recovers, with:
   - Duration of downtime (in minutes)
   - Number of failed checks
@@ -394,7 +454,7 @@ Command configuration fields:
 - 📅 **Scheduled Summaries**: Configure periodic summary reports using cron syntax
 - 🎯 **Smart Filtering**: Summaries are only sent when there are actually failing services
 - 📋 **Comprehensive Overview**: Shows all services currently down with error details and duration
-- 📢 **Broadcast Delivery**: Sent to all unique chat IDs from your monitored sites
+- 📢 **Broadcast Delivery**: Sent to all unique chat IDs from your monitored sites, commands and domains
 
 ### 🚧 Bypassing Telegram Blocking
 

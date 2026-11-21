@@ -151,3 +151,32 @@ commands:
     schedule: '* * * * *'  # Every minute
     tg_chats_to_notify:
       - '1234567890'
+
+# Domain registration expiry monitoring
+# Alerts when a domain expires in less than warn_days, has already expired, is not
+# registered / not delegated, or its registry cannot be queried.
+# Data: RDAP (IANA bootstrap) for most TLDs; whois for .ru/.su/.рф and their third-level zones.
+domains:
+  # 1. A .com domain, looked up over RDAP
+  example_com_domain:
+    domain: example.com
+    warn_days: 30            # alert when less than 30 days are left (default 30)
+    schedule: '0 9 * * *'    # daily at 09:00 (default)
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # 2. An internationalised domain: write it as is, it is converted to punycode internally
+  cyrillic_domain:
+    domain: пример.рф
+    warn_days: 45
+    notify_after_attempt: 2  # one failed whois lookup is not worth an alert
+    tg_chats_to_notify:
+      - '1234567890'
+
+  # 3. A TLD without RDAP: name the whois server yourself
+  #    (the answer must contain paid-till / Registry Expiry Date / Expiration Date)
+  # example_xx_domain:
+  #   domain: example.xx
+  #   whois_server: whois.nic.xx
+  #   tg_chats_to_notify:
+  #     - '1234567890'

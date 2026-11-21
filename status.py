@@ -10,12 +10,12 @@ and prints a human-readable status to the terminal.
 """
 import argparse
 import time
-from datetime import datetime, tzinfo
+from datetime import datetime, timezone, tzinfo
 from typing import Any, Dict, Optional
 
 from console_helper import Color, color_text
 from filesystem_helper import load_yaml_or_exit, load_cache
-from run import CACHE_PATH, CONFIG_PATH, resolve_timezone
+from run import CACHE_PATH, CONFIG_PATH, DOMAIN_DEFAULT, resolve_timezone
 
 
 def human_time(ts: Optional[int], tz: Optional[tzinfo] = None) -> str:
@@ -118,7 +118,9 @@ def print_site_status(
 
     url = site_cfg.get("url")
     command = site_cfg.get("command")
-    schedule = site_cfg.get("schedule", "* * * * *")
+    domain = site_cfg.get("domain")
+    # Domains default to a daily schedule; sites and commands to every minute.
+    schedule = site_cfg.get("schedule", DOMAIN_DEFAULT["schedule"] if domain else "* * * * *")
     notify_after = site_cfg.get("notify_after_attempt", 1)
 
     color_text(f"{site_name}", Color.TITLE)
@@ -129,6 +131,15 @@ def print_site_status(
 
     if command:
         print(f"  Command: {command}")
+
+    if domain:
+        print(f"  Domain: {domain}")
+        expires_at = cache_entry.get("domain_expires_at") if cache_entry else None
+
+        if expires_at:
+            expires = datetime.fromisoformat(expires_at)
+            days = int((expires - datetime.now(tz=timezone.utc)).total_seconds() // 86400)
+            print(f"  Registration expires: {expires.strftime('%Y-%m-%d')} ({days} days left)")
 
     print(f"  Schedule: {schedule}")
     print(f"  Notify after attempts: {notify_after}")
@@ -170,12 +181,13 @@ def main() -> None:
     config = load_yaml_or_exit(CONFIG_PATH)
     tz = resolve_timezone(config)
     cache = load_cache(CACHE_PATH)
-    sites = config.get("sites", {})
-    commands = config.get("commands", {})
-    all_checks = {**sites, **commands}
+    sites = config.get("sites") or {}
+    commands = config.get("commands") or {}
+    domains = config.get("domains") or {}
+    all_checks = {**sites, **commands, **{name: cfg for name, cfg in domains.items() if isinstance(cfg, dict)}}
 
     if not all_checks:
-        color_text("No sites or commands defined in config.yaml", Color.ERROR)
+        color_text("No sites, commands or domains defined in config.yaml", Color.ERROR)
 
         return
 

@@ -14,6 +14,7 @@ import requests
 from croniter import croniter, CroniterBadCronError, CroniterBadDateError
 from requests.structures import CaseInsensitiveDict
 
+import domain_helper
 import telegram_helper
 from console_helper import Color, color_text
 from filesystem_helper import save_cache, load_yaml_or_exit, load_cache, acquire_singleton_lock, release_singleton_lock
@@ -46,6 +47,18 @@ COMMAND_DEFAULT = {
     'min_value': None,
     'notify_after_attempt': 1,
 }
+DOMAIN_REQUIRED_FIELDS = ['domain', 'tg_chats_to_notify']
+DOMAIN_DEFAULT = {
+    'warn_days': 30,
+    'schedule': '0 9 * * *',
+    'timeout': 10,
+    'whois_server': None,
+    'notify_after_attempt': 1,
+}
+# A failing site or command is re-checked every minute. A failing domain is re-checked at
+# most this often: registries rate-limit whois, and an expired domain stays expired for days.
+DOMAIN_RETRY_SECONDS = 3600
+CHECK_DEFAULTS = {'site': DEFAULT, 'command': COMMAND_DEFAULT, 'domain': DOMAIN_DEFAULT}
 
 
 class RequestMethod(Enum):
@@ -369,6 +382,18 @@ def generate_tg_command_error_msg(messages: dict[str, str], err: str, name: str,
     ).strip()
 
 
+def generate_tg_domain_error_msg(messages: dict[str, str], err: str, name: str, domain: str, source: str,
+                                 count: int):
+    return messages['domain_error'].format(
+        name=telegram_helper.escape_special_chars(name),
+        error=telegram_helper.escape_special_chars(err),
+        server_info=get_server_info(),
+        count=count,
+        domain=telegram_helper.escape_special_chars(str(domain)),
+        source=telegram_helper.escape_special_chars(source or 'n/a'),
+    ).strip()
+
+
 def should_run(schedule: str, tz: tzinfo | None = None) -> bool:
     base_time = datetime.now(tz=tz).replace(second=0, microsecond=0)
     cron = croniter(schedule, base_time)
@@ -384,12 +409,20 @@ def get_uniq_chat_ids(chat_ids):
     return set(map(str, chat_ids))
 
 
+def get_section(config: dict, key: str) -> dict:
+    """A top-level section of checks; absent or empty (`domains:` with nothing under it) is {}."""
+    section = config.get(key)
+
+    return section if isinstance(section, dict) else {}
+
+
 def collect_all_chat_ids(config: dict) -> set:
     """Every chat ID mentioned anywhere in the config."""
     all_chat_ids = set()
 
-    for check in list(config.get('sites', {}).values()) + list(config.get('commands', {}).values()):
-        if 'tg_chats_to_notify' in check:
+    for check in (list(get_section(config, 'sites').values()) + list(get_section(config, 'commands').values())
+                  + list(get_section(config, 'domains').values())):
+        if isinstance(check, dict) and 'tg_chats_to_notify' in check:
             all_chat_ids.update(get_uniq_chat_ids(check['tg_chats_to_notify']))
 
     return all_chat_ids
@@ -436,7 +469,7 @@ def check_writing_to_cache():
 def check_config(config):
     report = {}
 
-    for site_name, site in config['sites'].items():
+    for site_name, site in get_section(config, 'sites').items():
         report[site_name] = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
 
         for field_name in REQUIRED_FIELDS:
@@ -505,10 +538,10 @@ def check_config(config):
                 report[site_name][Color.WARNING][field_name] = f"not found, default value is '{DEFAULT[field_name]}'"
 
     # Validate commands
-    for cmd_name, cmd in config.get('commands', {}).items():
+    for cmd_name, cmd in get_section(config, 'commands').items():
         report[cmd_name] = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
 
-        if cmd_name in config.get('sites', {}):
+        if cmd_name in get_section(config, 'sites'):
             report[cmd_name][Color.ERROR]['name'] = 'conflicts with a site of the same name'
 
         for field_name in COMMAND_REQUIRED_FIELDS:
@@ -537,6 +570,8 @@ def check_config(config):
         for field_name in cmd:
             if field_name not in COMMAND_REQUIRED_FIELDS and field_name not in COMMAND_DEFAULT:
                 report[cmd_name][Color.WARNING][field_name] = 'unknown field, ignored'
+
+    check_domains_config(config, report)
 
     # Check global parameters
     global_report = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
@@ -570,6 +605,75 @@ def check_config(config):
             global_report[Color.SUCCESS]['summary_schedule'] = summary_schedule
 
     print_check_config_report(report, global_report)
+
+
+def _is_positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def check_domains_config(config: dict, report: dict) -> None:
+    for name, entry in get_section(config, 'domains').items():
+        report[name] = {Color.ERROR: {}, Color.WARNING: {}, Color.SUCCESS: {}}
+        errors, warnings, successes = report[name][Color.ERROR], report[name][Color.WARNING], report[name][Color.SUCCESS]
+
+        if name in get_section(config, 'sites'):
+            errors['name'] = 'conflicts with a site of the same name'
+        elif name in get_section(config, 'commands'):
+            errors['name'] = 'conflicts with a command of the same name'
+
+        if not isinstance(entry, dict):
+            errors['domain'] = 'must be a dictionary with at least domain and tg_chats_to_notify'
+
+            continue
+
+        if 'domain' not in entry:
+            errors['domain'] = 'required field not found, you need to add it'
+        else:
+            try:
+                ascii_name = domain_helper.to_ascii(entry['domain'])
+                shown = entry['domain'] if ascii_name == entry['domain'] else f"{entry['domain']} ({ascii_name})"
+                source = domain_helper.describe_source(ascii_name, entry.get('whois_server'))
+                successes['domain'] = f"{shown}, data source: {source}"
+            except ValueError as e:
+                errors['domain'] = str(e)
+
+        if 'tg_chats_to_notify' not in entry:
+            errors['tg_chats_to_notify'] = 'required field not found, you need to add it'
+        else:
+            chat_id_list = entry['tg_chats_to_notify']
+
+            if not isinstance(chat_id_list, list):
+                errors['tg_chats_to_notify'] = 'must be a list of at least one chat ID'
+            elif not chat_id_list or not all(check_chat_id_validity(cid) for cid in chat_id_list):
+                errors['tg_chats_to_notify'] = 'chat IDs must contain only digits'
+            else:
+                successes['tg_chats_to_notify'] = ', '.join(get_uniq_chat_ids(chat_id_list))
+
+        for field_name, default in DOMAIN_DEFAULT.items():
+            if field_name not in entry:
+                if field_name != 'whois_server':
+                    warnings[field_name] = f"not found, default value is '{default}'"
+
+                continue
+
+            value = entry[field_name]
+
+            if field_name == 'schedule' and not (isinstance(value, str) and is_valid_cron(value)):
+                errors[field_name] = f"invalid cron syntax: '{value}'"
+            elif field_name in ('warn_days', 'notify_after_attempt') and not _is_positive_int(value):
+                errors[field_name] = f"must be a positive integer, got '{value}'"
+            elif field_name == 'timeout' and not (isinstance(value, (int, float)) and not isinstance(value, bool)
+                                                  and value > 0):
+                errors[field_name] = f"must be a positive number of seconds, got '{value}'"
+            elif field_name == 'whois_server' and not (isinstance(value, str)
+                                                       and domain_helper.HOST_RE.match(value.lower())):
+                errors[field_name] = f"must be a whois host name, got '{value}'"
+            else:
+                successes[field_name] = value
+
+        for field_name in entry:
+            if field_name not in DOMAIN_REQUIRED_FIELDS and field_name not in DOMAIN_DEFAULT:
+                warnings[field_name] = 'unknown field, ignored'
 
 
 def print_check_config_report(report, global_report=None):
@@ -662,7 +766,7 @@ def main():
     parser.add_argument(
         '--force',
         action='store_true',
-        help='Force check all sites immediately, regardless of the schedule'
+        help='Force check all sites, commands and domains immediately, regardless of the schedule'
     )
     parser.add_argument(
         '--check-config',
@@ -784,16 +888,12 @@ def main():
 
 
 def _get_check_config(name, config):
-    """Look up a check config by name — first in sites, then in commands."""
-    sites = config.get('sites', {})
+    """Look up a check config by name — first in sites, then in commands, then in domains."""
+    for section, check_type in (('sites', 'site'), ('commands', 'command'), ('domains', 'domain')):
+        checks = get_section(config, section)
 
-    if name in sites:
-        return sites[name], 'site'
-
-    commands = config.get('commands', {})
-
-    if name in commands:
-        return commands[name], 'command'
+        if name in checks and isinstance(checks[name], dict):
+            return checks[name], check_type
 
     return None, None
 
@@ -805,7 +905,7 @@ def process_cache(cache, config, messages):
         if check_cfg is None:
             continue
 
-        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        defaults = CHECK_DEFAULTS[check_type]
         notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
 
         failed_attempts = cache_info.get('failed_attempts', 0)
@@ -827,6 +927,15 @@ def process_cache(cache, config, messages):
                     timeout=last_error.get('timeout', DEFAULT['timeout']),
                     post_data=last_error.get('post_data'),
                     headers=last_error.get('headers'),
+                    count=failed_attempts,
+                )
+            elif check_type == 'domain':
+                tg_msg = generate_tg_domain_error_msg(
+                    messages,
+                    last_error['msg'],
+                    name=name,
+                    domain=last_error.get('domain', check_cfg.get('domain', '')),
+                    source=last_error.get('source', ''),
                     count=failed_attempts,
                 )
             else:
@@ -991,8 +1100,54 @@ def process_command(cmd_config, cmd_name: str, cache: dict):
     _update_cache(cmd_name, cache, error_message, error_details)
 
 
-def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tzinfo | None = None) -> str | None:
-    """Return run reason ('force'/'schedule'/'down') or None to skip."""
+def process_domain(domain_config, name: str, cache: dict):
+    for field in DOMAIN_REQUIRED_FIELDS:
+        if field not in domain_config:
+            # Same as process_command(): a check that cannot run must say so, not vanish.
+            error_message = f"misconfigured: required field '{field}' is missing"
+            color_text(f"'{name}': {error_message}", Color.ERROR)
+            _update_cache(name, cache, error_message,
+                          {'msg': error_message, 'domain': domain_config.get('domain', '')})
+
+            return
+
+    try:
+        ascii_name = domain_helper.to_ascii(domain_config['domain'])
+    except ValueError as e:
+        error_message = f"misconfigured: domain {e}"
+        _update_cache(name, cache, error_message, {'msg': error_message, 'domain': str(domain_config['domain'])})
+
+        return
+
+    warn_days = domain_config.get('warn_days', DOMAIN_DEFAULT['warn_days'])
+    timeout = domain_config.get('timeout', DOMAIN_DEFAULT['timeout'])
+    whois_server = domain_config.get('whois_server', DOMAIN_DEFAULT['whois_server'])
+
+    color_text(f"Checking domain registration: {name} ({ascii_name})", Color.QUOTATION)
+    info = domain_helper.get_domain_expiry(ascii_name, float(timeout), whois_server)
+    error_message = domain_helper.evaluate(info, warn_days)
+
+    if info['expires'] is not None:
+        left = domain_helper.days_left(info['expires'], datetime.now(tz=timezone.utc))
+        color_text(f"{ascii_name} expires on {info['expires']:%Y-%m-%d} ({left} days left), "
+                   f"source: {info['source']}", Color.QUOTATION)
+
+    error_details = {
+        'msg': error_message,
+        'domain': str(domain_config['domain']),
+        'source': info['source'],
+    } if error_message else None
+
+    _update_cache(name, cache, error_message, error_details)
+    cache[name]['domain_expires_at'] = info['expires'].isoformat() if info['expires'] else None
+
+
+def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tzinfo | None = None,
+                      retry_interval: int = 0) -> str | None:
+    """Return run reason ('force'/'schedule'/'down') or None to skip.
+
+    A failing check is re-run every minute, or at most every `retry_interval` seconds when given.
+    """
     if force:
         return "force"
 
@@ -1006,7 +1161,8 @@ def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tz
     except (CroniterBadCronError, CroniterBadDateError):
         pass
 
-    if has_error:
+    if has_error and not (retry_interval and
+                          int(time.time()) - cache_entry.get('last_checked_at', 0) < retry_interval):
         return "down"
     elif run_by_schedule:
         return "schedule"
@@ -1020,7 +1176,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
     skipped_count = 0
     tz = resolve_timezone(config)
 
-    for site_name, site in config.get('sites', {}).items():
+    for site_name, site in get_section(config, 'sites').items():
         schedule = site.get('schedule', DEFAULT['schedule'])
 
         if _should_run_check(site_name, schedule, cache, force, tz):
@@ -1029,11 +1185,23 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
         else:
             skipped_count += 1
 
-    for cmd_name, cmd_config in config.get('commands', {}).items():
+    for cmd_name, cmd_config in get_section(config, 'commands').items():
         schedule = cmd_config.get('schedule', COMMAND_DEFAULT['schedule'])
 
         if _should_run_check(cmd_name, schedule, cache, force, tz):
             process_command(cmd_config, cmd_name, cache)
+            processed_count += 1
+        else:
+            skipped_count += 1
+
+    for domain_name, domain_config in get_section(config, 'domains').items():
+        if not isinstance(domain_config, dict):
+            domain_config = {}
+
+        schedule = domain_config.get('schedule', DOMAIN_DEFAULT['schedule'])
+
+        if _should_run_check(domain_name, schedule, cache, force, tz, retry_interval=DOMAIN_RETRY_SECONDS):
+            process_domain(domain_config, domain_name, cache)
             processed_count += 1
         else:
             skipped_count += 1
@@ -1057,7 +1225,7 @@ def generate_summary_msg(messages: dict[str, str], cache: dict, config: dict) ->
         if check_cfg is None:
             continue
 
-        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        defaults = CHECK_DEFAULTS[check_type]
         notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
         failed_attempts = cache_info.get('failed_attempts', 0)
 
@@ -1124,7 +1292,7 @@ def send_summary_if_due(config, cache: dict, messages):
         if check_cfg is None:
             continue
 
-        defaults = DEFAULT if check_type == 'site' else COMMAND_DEFAULT
+        defaults = CHECK_DEFAULTS[check_type]
         notify_after_attempt = check_cfg.get('notify_after_attempt', defaults['notify_after_attempt'])
         failed_attempts = cache_info.get('failed_attempts', 0)
 
