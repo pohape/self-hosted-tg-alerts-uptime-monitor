@@ -3,6 +3,7 @@ import difflib
 import socket
 import ssl
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone, tzinfo
 from enum import Enum
@@ -769,6 +770,13 @@ def main():
         help='Force check all sites, commands and domains immediately, regardless of the schedule'
     )
     parser.add_argument(
+        '--only',
+        action='append',
+        metavar='NAME',
+        help='Check only the named site, command or domain immediately, regardless of the schedule. '
+             'Repeat the flag or separate names with commas: --only a --only b, --only a,b'
+    )
+    parser.add_argument(
         '--check-config',
         action='store_true',
         help='Check configuration for each site and display missing or default values'
@@ -780,6 +788,15 @@ def main():
     )
 
     args = parser.parse_args()
+    only = parse_only_names(args.only) if args.only is not None else None
+
+    if only is not None:
+        if not only:
+            parser.error('--only needs at least one check name')
+
+        if args.force or args.test_notifications or args.id_bot_mode or args.check_config:
+            parser.error('--only cannot be combined with --force, --test-notifications, '
+                         '--id-bot-mode or --check-config')
 
     if args.debug:
         color_text(f"[DEBUG] Parsed args: {args}", Color.QUOTATION)
@@ -844,12 +861,20 @@ def main():
             if args.debug:
                 color_text("[DEBUG] Entering normal monitoring mode", Color.TITLE)
 
+            if only is not None:
+                unknown = find_unknown_check_names(only, config)
+
+                if unknown:
+                    color_text(f"--only: unknown check name(s): {', '.join(unknown)}", Color.ERROR)
+                    color_text(f"Known checks: {', '.join(all_check_names(config)) or '(none)'}", Color.QUOTATION)
+                    sys.exit(2)
+
             cache = load_cache(CACHE_PATH)
 
             if args.debug:
                 color_text(f"[DEBUG] Cache loaded from {CACHE_PATH}, entries={len(cache)}", Color.QUOTATION)
 
-            process_each_site(args, config, cache, force=args.force)
+            process_each_site(args, config, cache, force=args.force, only=only)
 
             if args.debug:
                 color_text(f"[DEBUG] process_each_site() finished", Color.QUOTATION)
@@ -859,12 +884,15 @@ def main():
             if args.debug:
                 color_text("[DEBUG] Cache saved after process_each_site()", Color.QUOTATION)
 
-            process_cache(cache, config, messages)
+            process_cache(cache, config, messages, only=only)
 
             if args.debug:
                 color_text("[DEBUG] process_cache() finished", Color.QUOTATION)
 
-            send_summary_if_due(config, cache, messages)
+            # A manual --only run is about the named checks; the summary stays cron's job,
+            # otherwise a run in the summary minute would send it a second time.
+            if only is None:
+                send_summary_if_due(config, cache, messages)
 
             if args.debug:
                 color_text("[DEBUG] send_summary_if_due() finished", Color.QUOTATION)
@@ -898,8 +926,41 @@ def _get_check_config(name, config):
     return None, None
 
 
-def process_cache(cache, config, messages):
+def parse_only_names(values: list[str]) -> list[str]:
+    """Flatten repeated and comma-separated --only values, dropping blanks and duplicates."""
+    names = []
+
+    for value in values:
+        for name in value.split(','):
+            name = name.strip()
+
+            if name and name not in names:
+                names.append(name)
+
+    return names
+
+
+def all_check_names(config: dict) -> list[str]:
+    names = []
+
+    for section in ('sites', 'commands', 'domains'):
+        names.extend(str(name) for name in get_section(config, section))
+
+    return names
+
+
+def find_unknown_check_names(names: list[str], config: dict) -> list[str]:
+    known = set(all_check_names(config))
+
+    return [name for name in names if name not in known]
+
+
+def process_cache(cache, config, messages, only=None):
     for name, cache_info in cache.items():
+        # With --only, other checks' entries are left exactly as they are
+        if only is not None and name not in only:
+            continue
+
         check_cfg, check_type = _get_check_config(name, config)
 
         if check_cfg is None:
@@ -1143,11 +1204,16 @@ def process_domain(domain_config, name: str, cache: dict):
 
 
 def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tzinfo | None = None,
-                      retry_interval: int = 0) -> str | None:
-    """Return run reason ('force'/'schedule'/'down') or None to skip.
+                      retry_interval: int = 0, only=None) -> str | None:
+    """Return run reason ('force'/'only'/'schedule'/'down') or None to skip.
 
     A failing check is re-run every minute, or at most every `retry_interval` seconds when given.
+    With `only` (the --only names) just those checks run, right now: the schedule and the
+    retry interval are ignored for them, everything else is skipped.
     """
+    if only is not None:
+        return "only" if name in only else None
+
     if force:
         return "force"
 
@@ -1170,7 +1236,7 @@ def _should_run_check(name: str, schedule: str, cache: dict, force: bool, tz: tz
     return None
 
 
-def process_each_site(args, config, cache: dict, force=False) -> int:
+def process_each_site(args, config, cache: dict, force=False, only=None) -> int:
     """Process all sites and commands according to schedules and error state."""
     processed_count = 0
     skipped_count = 0
@@ -1179,7 +1245,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
     for site_name, site in get_section(config, 'sites').items():
         schedule = site.get('schedule', DEFAULT['schedule'])
 
-        if _should_run_check(site_name, schedule, cache, force, tz):
+        if _should_run_check(site_name, schedule, cache, force, tz, only=only):
             process_site(site, site_name, cache)
             processed_count += 1
         else:
@@ -1188,7 +1254,7 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
     for cmd_name, cmd_config in get_section(config, 'commands').items():
         schedule = cmd_config.get('schedule', COMMAND_DEFAULT['schedule'])
 
-        if _should_run_check(cmd_name, schedule, cache, force, tz):
+        if _should_run_check(cmd_name, schedule, cache, force, tz, only=only):
             process_command(cmd_config, cmd_name, cache)
             processed_count += 1
         else:
@@ -1200,7 +1266,8 @@ def process_each_site(args, config, cache: dict, force=False) -> int:
 
         schedule = domain_config.get('schedule', DOMAIN_DEFAULT['schedule'])
 
-        if _should_run_check(domain_name, schedule, cache, force, tz, retry_interval=DOMAIN_RETRY_SECONDS):
+        if _should_run_check(domain_name, schedule, cache, force, tz, retry_interval=DOMAIN_RETRY_SECONDS,
+                             only=only):
             process_domain(domain_config, domain_name, cache)
             processed_count += 1
         else:
